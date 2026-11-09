@@ -47,7 +47,7 @@ Each agent role receives a dedicated `--settings` JSON object (`build_permission
 All four roles pass `--json-schema <schema>` to `agy` and return validated JSON in the terminal `result.structured_output` event (`fix_die_repeat/agy_policy.py`):
 
 - **`REVIEW_SCHEMA`**: Requires `verdict` (`"NO_ISSUES"` or `"ISSUES"`), `issues_markdown`, and `summary`. `AgyRunner` writes `"NO_ISSUES"` or the formatted Markdown report to `<fdr_dir>/review_current.md`.
-- **`FIX_SCHEMA`**: Requires `outcome` (`"FIXED"`, `"PARTIAL"`, `"FAILED"`, or `"NOOP"`), `summary`, `files_modified`, and `resolved_thread_ids`. `AgyRunner` writes `resolved_thread_ids` (one per line) to `<fdr_dir>/.resolved_threads`, or unlinks the file when no threads were resolved.
+- **`FIX_SCHEMA`**: Requires `outcome` (`"fixed"` or `"blocked"`), `summary`, `files_modified`, and `resolved_thread_ids`. `AgyRunner` writes `resolved_thread_ids` (one per line) to `<fdr_dir>/.resolved_threads`, or unlinks the file when no threads were resolved.
 - **`INTROSPECT_SCHEMA`**: Requires `date`, `project`, `pr_number`, `pr_url`, `status` (`"pending"` or `"reviewed"`), and `threads` (each containing `id`, `title`, `category`, `outcome`, `summary`, `relevance`, and `lang_check_gap`). `AgyRunner` serializes the validated payload as YAML to `<fdr_dir>/.introspection_result.yaml`.
 - **`IMPROVE_PROMPTS_SCHEMA`**: Requires `reviewed_thread_ids`, `templates_updated`, and `summary`. When Jinja2 validation passes and matching thread IDs are reported, `AgyRunner` updates matching `status: pending` entries in `<FDR_HOME>/introspection.yaml` to `status: reviewed`.
 

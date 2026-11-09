@@ -214,11 +214,11 @@ class TestAppendReviewEntry:
 
         runner.append_review_entry(runner.iteration)
 
-        # Check that "No issues found" was written
+        # Check that "Review failed or no output was produced." was written
         assert paths.review_file.exists()
         content = paths.review_file.read_text()
         assert "Iteration 2" in content
-        assert "No issues found" in content
+        assert "Review failed or no output was produced." in content
 
 
 class TestRunFixAttempt:
@@ -1785,12 +1785,12 @@ class TestRunFullCodebaseReviewOnce:
         logged = " ".join(str(call) for call in logger.info.call_args_list)
         assert "No critical issues found" in logged
 
-    def test_no_review_file_created_is_treated_as_no_issues(self, tmp_path: Path) -> None:
-        """If pi didn't create review_current, the runner falls back to NO_ISSUES."""
+    def test_no_review_file_created_fails_closed(self, tmp_path: Path) -> None:
+        """If agy didn't create review_current, the runner fails closed."""
         runner, review_manager, _logger = self._build_runner(tmp_path)
 
         def fake_review(_iteration: int, _callback: object) -> None:
-            # Simulate pi failing to produce review_current.md
+            # Simulate agy failing to produce review_current.md
             runner.paths.review_current_file.unlink(missing_ok=True)
 
         review_manager.run_full_codebase_review.side_effect = fake_review
@@ -1798,7 +1798,7 @@ class TestRunFullCodebaseReviewOnce:
 
         result = runner.run_full_codebase_review_once()
 
-        assert result == 0
+        assert result == 1
         assert review_manager.run_full_codebase_review.call_count == 1
 
 
@@ -1881,6 +1881,21 @@ class TestRunContextualReviewOnce:
         assert review_manager.run_contextual_review.call_count == 1
         logged = " ".join(str(call) for call in logger.info.call_args_list)
         assert "No critical issues found" in logged
+
+    def test_no_review_file_created_fails_closed(self, tmp_path: Path) -> None:
+        """If agy didn't create review_current, contextual review fails closed."""
+        runner, review_manager, _logger = self._build_runner(tmp_path)
+
+        def fake_review(_iteration: int, _callback: object) -> None:
+            # Simulate agy failing to produce review_current.md
+            runner.paths.review_current_file.unlink(missing_ok=True)
+
+        review_manager.run_contextual_review.side_effect = fake_review
+
+        result = runner.run_contextual_review_once()
+
+        assert result == 1
+        assert review_manager.run_contextual_review.call_count == 1
 
     def test_dispatch_priority_over_full_codebase(self, tmp_path: Path) -> None:
         """contextual_review dispatch takes priority over full_codebase_review."""

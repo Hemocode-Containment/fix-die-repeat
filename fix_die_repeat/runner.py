@@ -39,6 +39,7 @@ from fix_die_repeat.agy_policy import (
     is_quota_error,
     rank_models_for_role,
     resolve_role_chain,
+    validate_structured_payload,
 )
 from fix_die_repeat.config import (
     Paths,
@@ -463,6 +464,83 @@ class AgyRunner:
             self.logger,
         )
 
+    def _materialize_review_output(
+        self,
+        result: AgyTurnResult,
+        structured: dict[str, object],
+    ) -> AgyTurnResult:
+        verdict = str(structured.get("verdict") or "").strip()
+        issues_md = str(structured.get("issues_markdown") or "").strip()
+        if verdict == "ISSUES":
+            if not issues_md or issues_md == "NO_ISSUES":
+                err_msg = (
+                    "Review verdict 'ISSUES' requires non-empty issues_markdown "
+                    "distinct from 'NO_ISSUES'."
+                )
+                self.logger.error(err_msg)
+                return replace(
+                    result,
+                    returncode=1,
+                    structured_output=None,
+                    stderr=err_msg,
+                )
+            self.paths.review_current_file.write_text(f"{issues_md}\n", encoding="utf-8")
+        else:
+            self.paths.review_current_file.write_text("NO_ISSUES", encoding="utf-8")
+        return result
+
+    def _materialize_introspect_output(
+        self,
+        result: AgyTurnResult,
+        structured: dict[str, object],
+    ) -> AgyTurnResult:
+        yaml_text = yaml.safe_dump(structured, default_flow_style=False, sort_keys=False)
+        self.paths.introspection_result_file.write_text(yaml_text, encoding="utf-8")
+        return result
+
+    def _materialize_fix_output(
+        self,
+        result: AgyTurnResult,
+        structured: dict[str, object],
+    ) -> AgyTurnResult:
+        resolved_ids = structured.get("resolved_thread_ids")
+        if isinstance(resolved_ids, list):
+            clean_ids = [
+                str(tid).strip()
+                for tid in resolved_ids
+                if isinstance(tid, str) and str(tid).strip()
+            ]
+            if clean_ids:
+                self.paths.pr_resolved_threads_file.write_text(
+                    "\n".join(clean_ids) + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                self.paths.pr_resolved_threads_file.unlink(missing_ok=True)
+        return result
+
+    def _materialize_improve_prompts_output(
+        self,
+        result: AgyTurnResult,
+        structured: dict[str, object],
+    ) -> AgyTurnResult:
+        raw_reviewed_ids = structured.get("reviewed_thread_ids")
+        reviewed_ids = (
+            {
+                str(tid).strip()
+                for tid in raw_reviewed_ids
+                if isinstance(tid, str) and str(tid).strip()
+            }
+            if isinstance(raw_reviewed_ids, list)
+            else set()
+        )
+        self._mark_introspection_entries_reviewed(reviewed_ids)
+        summary = str(structured.get("summary") or "").strip()
+        if summary and "<IMPROVE_PROMPTS_SUMMARY>" not in result.response_text:
+            wrapped = f"<IMPROVE_PROMPTS_SUMMARY>\n{summary}\n</IMPROVE_PROMPTS_SUMMARY>\n"
+            return replace(result, response_text=wrapped)
+        return result
+
     def _materialize_role_output(
         self,
         role: AgentRole,
@@ -470,57 +548,34 @@ class AgyRunner:
     ) -> AgyTurnResult:
         """Write supervisor-verified ``structured_output`` to ``<FDR_HOME>`` files."""
         structured = result.structured_output
+        schema = ROLE_SCHEMAS.get(role)
+        if schema is not None:
+            err = validate_structured_payload(structured, schema)
+            if err:
+                self.logger.error(
+                    "Turn structured output failed schema validation for role '%s': %s",
+                    role.value,
+                    err,
+                )
+                return replace(
+                    result,
+                    returncode=1,
+                    structured_output=None,
+                    stderr=f"Structured output schema validation failed: {err}",
+                )
+
         if not isinstance(structured, dict):
             return result
 
-        if role == AgentRole.REVIEW:
-            verdict = str(structured.get("verdict") or "").strip()
-            issues_md = str(structured.get("issues_markdown") or "").strip()
-            if verdict == "NO_ISSUES" or not issues_md or issues_md == "NO_ISSUES":
-                self.paths.review_current_file.write_text("NO_ISSUES", encoding="utf-8")
-            else:
-                self.paths.review_current_file.write_text(f"{issues_md}\n", encoding="utf-8")
-            return result
-
-        if role == AgentRole.INTROSPECT:
-            yaml_text = yaml.safe_dump(structured, default_flow_style=False, sort_keys=False)
-            self.paths.introspection_result_file.write_text(yaml_text, encoding="utf-8")
-            return result
-
-        if role == AgentRole.FIX:
-            resolved_ids = structured.get("resolved_thread_ids")
-            if isinstance(resolved_ids, list):
-                clean_ids = [
-                    str(tid).strip()
-                    for tid in resolved_ids
-                    if isinstance(tid, str) and str(tid).strip()
-                ]
-                if clean_ids:
-                    self.paths.pr_resolved_threads_file.write_text(
-                        "\n".join(clean_ids) + "\n",
-                        encoding="utf-8",
-                    )
-                else:
-                    self.paths.pr_resolved_threads_file.unlink(missing_ok=True)
-            return result
-
-        if role == AgentRole.IMPROVE_PROMPTS:
-            raw_reviewed_ids = structured.get("reviewed_thread_ids")
-            reviewed_ids = (
-                {
-                    str(tid).strip()
-                    for tid in raw_reviewed_ids
-                    if isinstance(tid, str) and str(tid).strip()
-                }
-                if isinstance(raw_reviewed_ids, list)
-                else set()
-            )
-            self._mark_introspection_entries_reviewed(reviewed_ids)
-            summary = str(structured.get("summary") or "").strip()
-            if summary and "<IMPROVE_PROMPTS_SUMMARY>" not in result.response_text:
-                wrapped = f"<IMPROVE_PROMPTS_SUMMARY>\n{summary}\n</IMPROVE_PROMPTS_SUMMARY>\n"
-                return replace(result, response_text=wrapped)
-
+        dispatch = {
+            AgentRole.REVIEW: self._materialize_review_output,
+            AgentRole.INTROSPECT: self._materialize_introspect_output,
+            AgentRole.FIX: self._materialize_fix_output,
+            AgentRole.IMPROVE_PROMPTS: self._materialize_improve_prompts_output,
+        }
+        handler = dispatch.get(role)
+        if handler is not None:
+            return handler(result, structured)
         return result
 
     @staticmethod
@@ -750,8 +805,10 @@ class AgyRunner:
             archive_dir = self.paths.fdr_dir / "archive" / archive_timestamp
             self.logger.info("Archiving existing artifacts to %s", archive_dir)
             archive_dir.mkdir(parents=True, exist_ok=True)
+            lock_name = self.paths.runner_lock_file.name
+            excluded_lock_files = {lock_name, f"{lock_name}.lck"}
             for file_path in self.paths.fdr_dir.glob("*"):
-                if file_path.is_file() and file_path.name != "runner.lock":
+                if file_path.is_file() and file_path.name not in excluded_lock_files:
                     file_path.rename(archive_dir / file_path.name)
 
         # Initialize logs
@@ -1113,11 +1170,10 @@ class AgyRunner:
 
         if not self.paths.review_current_file.exists():
             self.logger.error(
-                "%s was not created by agy. Treating as no issues.",
+                "Full-codebase review failed; %s was not created by agy.",
                 self.paths.review_current_file,
             )
-            self.paths.review_current_file.write_text("NO_ISSUES")
-            self.paths.review_file.write_text("NO_ISSUES\n")
+            return 1
 
         review_content = (
             self.paths.review_file.read_text() if self.paths.review_file.exists() else ""
@@ -1179,11 +1235,10 @@ class AgyRunner:
 
         if not self.paths.review_current_file.exists():
             self.logger.error(
-                "%s was not created by agy. Treating as no issues.",
+                "Contextual review failed; %s was not created by agy.",
                 self.paths.review_current_file,
             )
-            self.paths.review_current_file.write_text("NO_ISSUES")
-            self.paths.review_file.write_text("NO_ISSUES\n")
+            return 1
 
         review_content = (
             self.paths.review_file.read_text() if self.paths.review_file.exists() else ""
@@ -2351,7 +2406,7 @@ class AgyRunner:
                 ):
                     f.write(self.paths.review_current_file.read_text())
                 else:
-                    f.write("_No issues found._\n")
+                    f.write("_Review failed or no output was produced._\n")
                 f.write("\n")
 
     def build_review_prompt(self, diff_size: int, attachments: list[Path]) -> str:
@@ -2429,8 +2484,8 @@ class AgyRunner:
         )
 
         if returncode != 0:
-            self.logger.info("agy review failed. Treating as no issues found.")
-            self.paths.review_current_file.write_text("NO_ISSUES")
+            self.logger.error("agy review failed with exit code %s.", returncode)
+            self.paths.review_current_file.unlink(missing_ok=True)
 
     def collect_introspection_data(
         self,

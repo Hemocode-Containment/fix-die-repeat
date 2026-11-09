@@ -567,8 +567,8 @@ class TestRunFullCodebaseReview:
         assert content == "[CRITICAL] second run\n"
         assert "first run" not in content
 
-    def test_pi_failure_writes_no_issues(self, tmp_path: Path) -> None:
-        """When agent fails we should still produce a NO_ISSUES marker."""
+    def test_pi_failure_unlinks_review_current_and_records_failure(self, tmp_path: Path) -> None:
+        """When agent fails we should leave review_current unlinked and record failure."""
         manager = self._make_manager(tmp_path)
         run_pi = MagicMock(return_value=(1, "", "boom"))
 
@@ -578,8 +578,8 @@ class TestRunFullCodebaseReview:
         ):
             manager.run_full_codebase_review(iteration=1, run_agent_callback=run_pi)
 
-        assert manager.paths.review_current_file.read_text() == "NO_ISSUES"
-        assert manager.paths.review_file.read_text().strip() == "NO_ISSUES"
+        assert not manager.paths.review_current_file.exists()
+        assert manager.paths.review_file.read_text().strip() == "Review failed."
 
 
 class TestRunContextualReview:
@@ -672,8 +672,8 @@ class TestRunContextualReview:
         # run_pi should NOT be called directly — full review handles that
         assert not run_pi.called
 
-    def test_pi_failure_writes_no_issues(self, tmp_path: Path) -> None:
-        """When agent fails, NO_ISSUES is written."""
+    def test_pi_failure_unlinks_review_current_and_records_failure(self, tmp_path: Path) -> None:
+        """When agent fails, review_current is unlinked and failure is recorded."""
         manager = self._make_manager(tmp_path)
         run_pi = MagicMock(return_value=(1, "", "boom"))
 
@@ -689,5 +689,5 @@ class TestRunContextualReview:
         ):
             manager.run_contextual_review(iteration=1, run_agent_callback=run_pi)
 
-        assert manager.paths.review_current_file.read_text() == "NO_ISSUES"
-        assert manager.paths.review_file.read_text().strip() == "NO_ISSUES"
+        assert not manager.paths.review_current_file.exists()
+        assert manager.paths.review_file.read_text().strip() == "Review failed."

@@ -156,8 +156,8 @@ class TestReviewManager:
         assert "Write exactly NO_ISSUES" not in prompt
         assert "scoped file list" in prompt
 
-    def test_run_agent_review_failure_marks_no_issues(self, tmp_path: Path) -> None:
-        """Review failures should mark review_current as NO_ISSUES."""
+    def test_run_agent_review_failure_unlinks_review_current(self, tmp_path: Path) -> None:
+        """Review failures should unlink review_current to fail closed."""
         settings = Settings(auto_attach_threshold=5000)
         paths = Paths(project_root=tmp_path)
         paths.ensure_fdr_dir()
@@ -172,7 +172,7 @@ class TestReviewManager:
         manager.run_agent_review(diff_size=10, run_agent_callback=run_agent_callback)
 
         assert run_agent_callback.called
-        assert paths.review_current_file.read_text() == "NO_ISSUES"
+        assert not paths.review_current_file.exists()
 
     def test_run_local_review_no_changes_records_review_entry(self, tmp_path: Path) -> None:
         """Skipping review with no changes should clear diff and record entry."""

@@ -106,7 +106,7 @@ class TestRunAgentAndMaterializeOutput:
             response_text="No threads resolved",
             stderr="",
             structured_output={
-                "outcome": "noop",
+                "outcome": "blocked",
                 "summary": "No threads needed fix",
                 "files_modified": [],
                 "resolved_thread_ids": [],
@@ -280,6 +280,57 @@ class TestRunAgentAndMaterializeOutput:
         assert stdout == "fixed"
         runner.emergency_compact.assert_called_once()
 
+    def test_run_agent_materialize_fails_on_schema_violation(self, tmp_path: Path) -> None:
+        """run_agent fails closed when structured_output violates role schema."""
+        runner, mock_client = _build_runner(tmp_path)
+        turn = AgyTurnResult(
+            returncode=0,
+            response_text="Bad review output",
+            stderr="",
+            structured_output={
+                "verdict": "INVALID_VERDICT",
+                "issues_markdown": "none",
+                "summary": "invalid",
+            },
+            model="gemini-3-flash",
+        )
+        mock_client.run_turn.return_value = turn
+        runner._verify_turn_git_state = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        with patch("fix_die_repeat.runner.fetch_codexbar_snapshot", return_value=None):
+            rc, _stdout, stderr = runner.run_agent(AgentRole.REVIEW, "Review diff")
+
+        assert rc == 1
+        assert "schema validation failed" in stderr
+        assert not runner.paths.review_current_file.exists()
+
+    def test_run_agent_materialize_fails_on_issues_verdict_with_empty_or_no_issues_markdown(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """run_agent fails closed when verdict ISSUES has empty or NO_ISSUES markdown."""
+        runner, mock_client = _build_runner(tmp_path)
+        turn = AgyTurnResult(
+            returncode=0,
+            response_text="Contradictory output",
+            stderr="",
+            structured_output={
+                "verdict": "ISSUES",
+                "issues_markdown": "NO_ISSUES",
+                "summary": "Clean",
+            },
+            model="gemini-3-flash",
+        )
+        mock_client.run_turn.return_value = turn
+        runner._verify_turn_git_state = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        with patch("fix_die_repeat.runner.fetch_codexbar_snapshot", return_value=None):
+            rc, _stdout, stderr = runner.run_agent(AgentRole.REVIEW, "Review diff")
+
+        assert rc == 1
+        assert "Review verdict 'ISSUES' requires non-empty issues_markdown" in stderr
+        assert not runner.paths.review_current_file.exists()
+
 
 class TestPreflightAndSetup:
     """Tests for run_preflight and setup_run."""
@@ -342,6 +393,38 @@ class TestPreflightAndSetup:
         assert runner.paths.start_sha_file.read_text() == "abc123"
         runner.run_preflight.assert_called_once()
         runner.check_and_compact_artifacts.assert_called_once()
+
+    def test_setup_run_preserves_runner_lock_sidecar(self, tmp_path: Path) -> None:
+        """setup_run preserves both runner.lock and runner.lock.lck during archive."""
+        runner, _mock_client = _build_runner(tmp_path)
+        runner.settings.archive_artifacts = True
+        runner.settings.preflight = False
+        runner.settings.compact_artifacts = False
+        runner.session_log = runner.paths.fdr_dir / "session.log"
+        runner.run_preflight = MagicMock()  # type: ignore[method-assign]
+        runner.check_and_compact_artifacts = MagicMock()  # type: ignore[method-assign]
+
+        lock_file = runner.paths.fdr_dir / "runner.lock"
+        lock_file.write_text("12345:inst")
+        sidecar_file = runner.paths.fdr_dir / "runner.lock.lck"
+        sidecar_file.write_text("lock-sidecar")
+        artifact_file = runner.paths.fdr_dir / "checks.log"
+        artifact_file.write_text("old checks")
+
+        with patch("fix_die_repeat.runner.run_command", return_value=(0, "abc123\n", "")):
+            runner.setup_run()
+
+        assert lock_file.exists()
+        assert lock_file.read_text() == "12345:inst"
+        assert sidecar_file.exists()
+        assert sidecar_file.read_text() == "lock-sidecar"
+
+        archive_dirs = list((runner.paths.fdr_dir / "archive").glob("*"))
+        assert archive_dirs
+        archived_files = [p.name for p in archive_dirs[0].iterdir()]
+        assert "checks.log" in archived_files
+        assert "runner.lock" not in archived_files
+        assert "runner.lock.lck" not in archived_files
 
     def test_check_oscillation_detects_repeat(self, tmp_path: Path) -> None:
         """check_oscillation returns warning for repeated hash."""

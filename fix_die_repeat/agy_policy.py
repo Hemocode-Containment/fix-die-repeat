@@ -200,6 +200,75 @@ ROLE_SCHEMAS: dict[AgentRole, dict[str, object]] = {
 }
 
 
+def _validate_type(payload: object, expected_type: str) -> str | None:
+    if expected_type == "object" and not isinstance(payload, dict):
+        return f"expected object, got {type(payload).__name__}"
+    if expected_type == "string" and not isinstance(payload, str):
+        return f"expected string, got {type(payload).__name__}"
+    if expected_type == "integer" and (not isinstance(payload, int) or isinstance(payload, bool)):
+        return f"expected integer, got {type(payload).__name__}"
+    if expected_type == "array" and not isinstance(payload, list):
+        return f"expected array, got {type(payload).__name__}"
+    return None
+
+
+def _validate_dict_properties(
+    payload: dict[str, object],
+    schema: dict[str, object],
+) -> str | None:
+    required = schema.get("required")
+    if isinstance(required, list):
+        for req_key in required:
+            if req_key not in payload:
+                return f"missing required property '{req_key}'"
+    properties = schema.get("properties")
+    prop_dict = properties if isinstance(properties, dict) else {}
+    if schema.get("additionalProperties") is False:
+        for key in payload:
+            if key not in prop_dict:
+                return f"unexpected property '{key}'"
+    for key, prop_schema in prop_dict.items():
+        if key in payload and isinstance(prop_schema, dict):
+            prop_err = validate_structured_payload(payload[key], prop_schema)
+            if prop_err:
+                return f"property '{key}': {prop_err}"
+    return None
+
+
+def _validate_list_items(
+    payload: list[object],
+    schema: dict[str, object],
+) -> str | None:
+    item_schema = schema.get("items")
+    if isinstance(item_schema, dict):
+        for i, item in enumerate(payload):
+            item_err = validate_structured_payload(item, item_schema)
+            if item_err:
+                return f"index [{i}]: {item_err}"
+    return None
+
+
+def validate_structured_payload(payload: object, schema: dict[str, object]) -> str | None:
+    """Validate ``payload`` against a role JSON schema dictionary, returning error or None."""
+    expected_type = schema.get("type")
+    if isinstance(expected_type, str):
+        type_err = _validate_type(payload, expected_type)
+        if type_err:
+            return type_err
+
+    enum_vals = schema.get("enum")
+    if isinstance(enum_vals, list) and payload not in enum_vals:
+        return f"value {payload!r} not in enum {enum_vals}"
+
+    if isinstance(payload, dict):
+        return _validate_dict_properties(payload, schema)
+
+    if isinstance(payload, list):
+        return _validate_list_items(payload, schema)
+
+    return None
+
+
 class AgyPolicyError(RuntimeError):
     """Raised when ``agy`` preflight, model validation, or quota caps fail."""
 

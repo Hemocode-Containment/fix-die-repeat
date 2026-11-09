@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fix_die_repeat.agy_policy import (
+    ROLE_SCHEMAS,
     AgentRole,
     AgyPolicyError,
     PermissionProfileContext,
@@ -26,6 +27,7 @@ from fix_die_repeat.agy_policy import (
     parse_iso_timestamp,
     rank_models_for_role,
     resolve_role_chain,
+    validate_structured_payload,
 )
 
 if TYPE_CHECKING:
@@ -337,3 +339,110 @@ class TestPermissionSettingsAndPreflight:
         assert result.version == "Antigravity 2.1.29"
         assert result.smoke_tested is False
         assert mock_run.call_count == 1
+
+
+class TestValidateStructuredPayload:
+    """Tests for validate_structured_payload against role schemas."""
+
+    def test_validate_review_schema_valid_no_issues(self) -> None:
+        payload = {"verdict": "NO_ISSUES", "issues_markdown": "", "summary": "clean"}
+        assert validate_structured_payload(payload, ROLE_SCHEMAS[AgentRole.REVIEW]) is None
+
+    def test_validate_review_schema_valid_issues(self) -> None:
+        payload = {
+            "verdict": "ISSUES",
+            "issues_markdown": "[CRITICAL] bug",
+            "summary": "found bug",
+        }
+        assert validate_structured_payload(payload, ROLE_SCHEMAS[AgentRole.REVIEW]) is None
+
+    def test_validate_review_schema_invalid_enum(self) -> None:
+        payload = {"verdict": "MAYBE", "issues_markdown": "", "summary": ""}
+        err = validate_structured_payload(payload, ROLE_SCHEMAS[AgentRole.REVIEW])
+        assert err is not None
+        assert "property 'verdict'" in err
+
+    def test_validate_fix_schema_valid(self) -> None:
+        payload = {
+            "outcome": "fixed",
+            "summary": "fixed bug",
+            "files_modified": ["app.py"],
+            "resolved_thread_ids": ["T1"],
+        }
+        assert validate_structured_payload(payload, ROLE_SCHEMAS[AgentRole.FIX]) is None
+
+    def test_validate_fix_schema_invalid_outcome(self) -> None:
+        payload = {
+            "outcome": "noop",
+            "summary": "did nothing",
+            "files_modified": [],
+            "resolved_thread_ids": [],
+        }
+        err = validate_structured_payload(payload, ROLE_SCHEMAS[AgentRole.FIX])
+        assert err is not None
+        assert "property 'outcome'" in err
+
+    def test_validate_introspect_schema_valid(self) -> None:
+        payload = {
+            "date": "2026-11-09",
+            "project": "fix-die-repeat",
+            "pr_number": 81,
+            "pr_url": "https://example.com/pr/81",
+            "status": "pending",
+            "threads": [
+                {
+                    "id": "T1",
+                    "title": "Finding",
+                    "category": "logic",
+                    "outcome": "fixed",
+                    "summary": "summary",
+                    "relevance": "high",
+                    "lang_check_gap": "none",
+                },
+            ],
+        }
+        assert validate_structured_payload(payload, ROLE_SCHEMAS[AgentRole.INTROSPECT]) is None
+
+    def test_validate_improve_prompts_schema_valid(self) -> None:
+        payload = {
+            "reviewed_thread_ids": ["T1"],
+            "templates_updated": ["fix_checks.j2"],
+            "summary": "updated template",
+        }
+        assert validate_structured_payload(payload, ROLE_SCHEMAS[AgentRole.IMPROVE_PROMPTS]) is None
+
+    def test_validate_missing_required_property(self) -> None:
+        payload = {"verdict": "NO_ISSUES"}
+        err = validate_structured_payload(payload, ROLE_SCHEMAS[AgentRole.REVIEW])
+        assert err is not None
+        assert "missing required property" in err
+
+    def test_validate_additional_properties_forbidden(self) -> None:
+        payload = {
+            "verdict": "NO_ISSUES",
+            "issues_markdown": "",
+            "summary": "clean",
+            "extra_key": "unwanted",
+        }
+        err = validate_structured_payload(payload, ROLE_SCHEMAS[AgentRole.REVIEW])
+        assert err is not None
+        assert "unexpected property 'extra_key'" in err
+
+    def test_validate_type_mismatches(self) -> None:
+        assert validate_structured_payload("not-a-dict", {"type": "object"}) is not None
+        assert validate_structured_payload(123, {"type": "string"}) is not None
+        assert validate_structured_payload("abc", {"type": "integer"}) is not None
+        bool_flag = True
+        assert validate_structured_payload(bool_flag, {"type": "integer"}) is not None
+        assert validate_structured_payload("abc", {"type": "array"}) is not None
+
+    def test_validate_array_item_schema_failure(self) -> None:
+        payload = {
+            "outcome": "fixed",
+            "summary": "done",
+            "files_modified": [123],
+            "resolved_thread_ids": [],
+        }
+        err = validate_structured_payload(payload, ROLE_SCHEMAS[AgentRole.FIX])
+        assert err is not None
+        assert "files_modified" in err

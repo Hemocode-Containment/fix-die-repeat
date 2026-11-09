@@ -204,8 +204,8 @@ class ReviewManager:
         )
 
         if returncode != 0:
-            self.logger.info("agy review failed. Treating as no issues found.")
-            self.paths.review_current_file.write_text("NO_ISSUES")
+            self.logger.error("agy review failed with exit code %s.", returncode)
+            self.paths.review_current_file.unlink(missing_ok=True)
 
     def build_review_prompt(
         self, diff_size: int, attachments: list[Path], *, file_list_attached: bool = False
@@ -276,7 +276,7 @@ class ReviewManager:
             ):
                 f.write(self.paths.review_current_file.read_text())
             else:
-                f.write("_No issues found._\n")
+                f.write("_Review failed or no output was produced._\n")
             f.write("\n")
 
     def has_no_review_issues(self, review_content: str) -> bool:
@@ -401,8 +401,8 @@ class ReviewManager:
         returncode, _, _ = run_agent_callback(AgentRole.REVIEW, review_prompt)
 
         if returncode != 0:
-            self.logger.info("agy review failed. Treating as no issues found.")
-            self.paths.review_current_file.write_text("NO_ISSUES")
+            self.logger.error("agy review failed with exit code %s.", returncode)
+            self.paths.review_current_file.unlink(missing_ok=True)
 
         # Copy the review output verbatim into review.md (no iteration headers).
         if self.paths.review_current_file.exists():
@@ -412,7 +412,7 @@ class ReviewManager:
             else:
                 self.paths.review_file.write_text("NO_ISSUES\n")
         else:
-            self.paths.review_file.write_text("NO_ISSUES\n")
+            self.paths.review_file.write_text("Review failed.\n")
 
     def run_contextual_review(
         self,
@@ -498,8 +498,8 @@ class ReviewManager:
         )
 
         if returncode != 0:
-            self.logger.info("agy review failed. Treating as no issues found.")
-            self.paths.review_current_file.write_text("NO_ISSUES")
+            self.logger.error("agy review failed with exit code %s.", returncode)
+            self.paths.review_current_file.unlink(missing_ok=True)
 
         # Copy the review output verbatim into review.md (no iteration headers).
         if self.paths.review_current_file.exists():
@@ -509,7 +509,7 @@ class ReviewManager:
             else:
                 self.paths.review_file.write_text("NO_ISSUES\n")
         else:
-            self.paths.review_file.write_text("NO_ISSUES\n")
+            self.paths.review_file.write_text("Review failed.\n")
 
     def check_prohibited_ruff_ignores(self) -> None:
         """Check for prohibited ruff rules in per-file-ignores.
