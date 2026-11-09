@@ -36,20 +36,6 @@ fi
 echo "🛡️  Validating ruff rule ignore policy..."
 $VALIDATE_SCRIPT
 
-# Preflight: sync the pi-bridge Node dependencies with the lockfile. The sidecar
-# bridge at priv/pi-bridge/ is required for any real `fix-die-repeat` run and
-# for the integration test suite. Always running `npm ci` (rather than skipping
-# when node_modules is present) keeps local runs reproducible and aligned with
-# CI — a package.json/lockfile change otherwise silently leaves a stale tree.
-if [[ -d "priv/pi-bridge" ]]; then
-    if command -v npm &> /dev/null; then
-        echo "📦 Syncing pi-bridge Node dependencies with npm ci..."
-        (cd priv/pi-bridge && npm ci)
-    else
-        echo "⚠️  npm not found on PATH; skipping pi-bridge install (bridge tests will be limited)."
-    fi
-fi
-
 if [[ "$CHECK_ONLY" == "true" ]]; then
     echo "🔍 Running ruff linting (check-only mode)..."
     $RUFF check .

@@ -33,7 +33,7 @@ class TestCliMain:
         assert "--max-iters" in result.output
         assert "--model" in result.output
         assert "--pr-review" in result.output
-        assert "--test-model" in result.output
+        assert "--preflight" in result.output
 
     def test_cli_version(self) -> None:
         """Test that CLI version works."""
@@ -41,18 +41,12 @@ class TestCliMain:
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
 
-    def test_cli_missing_test_model_integration(self) -> None:
-        """Test CLI behavior with test-model when no pi is available.
-
-        This is an integration test that simulates the case where pi is not installed.
-        The CLI should handle this gracefully or exit with a clear error.
-        """
+    def test_cli_preflight_flag_in_help(self) -> None:
+        """Test CLI accepts --preflight flag."""
         runner = CliRunner()
-        # We can't fully test the pi integration without mocking subprocess calls
-        # but we can test that the CLI accepts the flag
-        result = runner.invoke(main, ["--test-model", "test-model", "--help"])
+        result = runner.invoke(main, ["--preflight", "--help"])
         assert result.exit_code == 0
-        assert "--test-model" in result.output
+        assert "--preflight" in result.output
 
     def test_cli_with_max_iters(self) -> None:
         """Test CLI with max-iters option."""
@@ -67,7 +61,7 @@ class TestCliMain:
         runner = CliRunner()
         result = runner.invoke(main, ["--help"])
         assert "--model" in result.output
-        assert "Override model selection" in result.output
+        assert "Primary agy model ID" in result.output
 
     def test_cli_with_pr_review(self) -> None:
         """Test CLI with pr-review flag."""
@@ -155,7 +149,7 @@ class TestCliMain:
 
         monkeypatch.setattr(config, "Paths", mock_paths)
         # Guard: if validation ever fails silently, we don't want a real run.
-        monkeypatch.setattr(runner.PiRunner, "run", lambda _self: 0)
+        monkeypatch.setattr(runner.AgyRunner, "run", lambda _self: 0)
 
         cli_runner = CliRunner()
         result = cli_runner.invoke(main, flags, catch_exceptions=False)
@@ -204,7 +198,7 @@ class TestCliMain:
         monkeypatch.setattr(cli_module, "validate_check_cmd_or_exit", lambda _cmd: None)
 
         # Mock PiRunner.run so we don't actually run anything
-        monkeypatch.setattr(runner.PiRunner, "run", lambda _self: 0)
+        monkeypatch.setattr(runner.AgyRunner, "run", lambda _self: 0)
 
         cli_runner = CliRunner()
         result = cli_runner.invoke(main, [flag], catch_exceptions=False)
@@ -230,9 +224,9 @@ class TestCliMain:
         monkeypatch.delenv("FDR_CHECK_CMD", raising=False)
 
         def fail_if_runner_used(_self: object) -> int:
-            pytest.fail("PiRunner.run must not be invoked for a no-op --improve-prompts")
+            pytest.fail("AgyRunner.run must not be invoked for a no-op --improve-prompts")
 
-        monkeypatch.setattr(runner.PiRunner, "run", fail_if_runner_used)
+        monkeypatch.setattr(runner.AgyRunner, "run", fail_if_runner_used)
 
         cli_runner = CliRunner()
         result = cli_runner.invoke(main, ["--improve-prompts"], catch_exceptions=False)
@@ -288,7 +282,7 @@ class TestCliMain:
         assert "max-iters" in result.output
         assert "model" in result.output
         assert "pr-review" in result.output
-        assert "test-model" in result.output
+        assert "preflight" in result.output
 
 
 class TestCliOptions:
@@ -376,7 +370,7 @@ class TestBuildCliOptions:
             "no_compact": True,
             "pr_review": True,
             "pr_review_introspect": True,
-            "test_model": "test-model-2",
+            "preflight": True,
             "debug": True,
         }
 
@@ -390,7 +384,7 @@ class TestBuildCliOptions:
         assert options.no_compact is True
         assert options.pr_review is True
         assert options.pr_review_introspect is True
-        assert options.test_model == "test-model-2"
+        assert options.preflight is True
         assert options.debug is True
 
     def test_archive_artifacts_flag_true(self) -> None:
@@ -425,7 +419,7 @@ class TestBuildCliOptions:
         assert options.pr_review_introspect is False
         assert options.full_codebase_review is False
         assert options.pr_threads_introspect_only is False
-        assert options.test_model is None
+        assert options.preflight is False
         assert options.debug is False
 
     def test_contextual_review_propagates_to_settings(self) -> None:
@@ -503,7 +497,7 @@ class TestBuildCliOptions:
         assert options.archive_artifacts is None
         assert options.no_compact is True
         assert options.pr_review is False
-        assert options.test_model is None
+        assert options.preflight is False
         assert options.debug is False
 
     def test_type_conversions(self) -> None:
@@ -537,7 +531,7 @@ class TestCliExceptions:
         def interrupting_run(_self: object) -> int:
             raise KeyboardInterrupt
 
-        monkeypatch.setattr(runner.PiRunner, "run", interrupting_run)
+        monkeypatch.setattr(runner.AgyRunner, "run", interrupting_run)
 
         cli_runner = CliRunner()
         result = cli_runner.invoke(main, catch_exceptions=False)
@@ -559,7 +553,7 @@ class TestCliExceptions:
         def failing_run(_self: object) -> int:
             raise RuntimeError
 
-        monkeypatch.setattr(runner.PiRunner, "run", failing_run)
+        monkeypatch.setattr(runner.AgyRunner, "run", failing_run)
 
         cli_runner = CliRunner()
         result = cli_runner.invoke(main, catch_exceptions=False)
@@ -585,7 +579,7 @@ class TestCliExceptions:
         def failing_run(_self: object) -> int:
             raise RuntimeError
 
-        monkeypatch.setattr(runner.PiRunner, "run", failing_run)
+        monkeypatch.setattr(runner.AgyRunner, "run", failing_run)
 
         cli_runner = CliRunner()
         result = cli_runner.invoke(main, ["--debug"], catch_exceptions=False)
@@ -621,7 +615,7 @@ class TestCliResolution:
                 captured_check_cmd.append(settings.check_cmd)
             return 0
 
-        monkeypatch.setattr(runner.PiRunner, "run", capturing_run)
+        monkeypatch.setattr(runner.AgyRunner, "run", capturing_run)
 
         cli_runner = CliRunner()
         result = cli_runner.invoke(main, ["-c", "pytest"], catch_exceptions=False)
@@ -688,7 +682,7 @@ class TestCliResolution:
                 captured_check_cmd.append(settings.check_cmd)
             return 0
 
-        monkeypatch.setattr(runner.PiRunner, "run", capturing_run)
+        monkeypatch.setattr(runner.AgyRunner, "run", capturing_run)
 
         cli_runner = CliRunner()
         result = cli_runner.invoke(main, catch_exceptions=False)

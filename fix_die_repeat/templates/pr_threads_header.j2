@@ -4,5 +4,5 @@ Please review each thread, check the associated code, and determine if a fix is 
 If a fix is needed, apply it. If not, explain why.
 
 CRITICAL: For each thread below, the 'ID' is the GraphQL thread ID. This is the ID you must use when marking threads as resolved.
-When you decide a thread is resolved, add its ID to the file '{{ resolved_threads_path }}' (one ID per line); the runner will use that file to resolve those threads.
-If a thread does not need a code change, clearly explain why in your answer for that thread so your reasoning is captured, but do not call any tools like 'resolve_pr_threads' or 'reply_to_thread' directly.
+When you decide a thread is resolved, include its ID in `resolved_thread_ids` in your structured JSON response; the runner writes those IDs to the file '{{ resolved_threads_path }}' (one ID per line) and uses that file to resolve those threads.
+If a thread does not need a code change, include its ID and reason in `declined_threads` in your structured JSON response so your reasoning is captured, and do not call any tools like 'resolve_pr_threads' or 'reply_to_thread' directly.

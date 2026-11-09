@@ -1,7 +1,7 @@
 [project]
 name = "fix-die-repeat"
 version = "0.1.0"
-description = "Automated check, review, and fix loop using pi"
+description = "Automated check, review, and fix loop using Antigravity (agy)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -30,25 +30,15 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# Include pi-bridge JavaScript sidecar (bridge.js + package.json + lockfile)
-# in the installed wheel so the runtime can find it next to fix_die_repeat/.
-# node_modules/ is NOT bundled — ensure_bridge_installed() runs `npm ci` on
-# first use.
 [tool.hatch.build.targets.wheel]
 packages = ["fix_die_repeat"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"priv/pi-bridge/bridge.js" = "priv/pi-bridge/bridge.js"
-"priv/pi-bridge/package.json" = "priv/pi-bridge/package.json"
-"priv/pi-bridge/package-lock.json" = "priv/pi-bridge/package-lock.json"
-"priv/pi-bridge/.gitignore" = "priv/pi-bridge/.gitignore"
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
 lint.select = ["ALL"]
 lint.ignore = ["COM812", "D203", "D213"]
-extend-exclude = ["*.j2"]
+extend-exclude = ["*.j2", ".agents"]
 
 [tool.ruff.lint.per-file-ignores]
 "fix_die_repeat/cli.py" = [
@@ -86,5 +76,5 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "--cov=fix_die_repeat --cov-report=term-missing --cov-report=xml --cov-fail-under=80 -m 'not integration'"
 markers = [
-    "integration: end-to-end tests that require external runtimes (node, etc.); run with `-m integration`",
+    "integration: end-to-end tests that require external runtimes (agy, codexbar, etc.); run with `-m integration`",
 ]

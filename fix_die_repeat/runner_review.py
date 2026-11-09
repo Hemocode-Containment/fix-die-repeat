@@ -2,7 +2,7 @@
 
 This module handles the local code review phase including:
 - Generating and reviewing git diffs
-- Running pi review prompts
+- Running Antigravity (agy) review prompts
 - Processing review results and applying fixes
 """
 
@@ -11,6 +11,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from fix_die_repeat.agy_policy import AgentRole
 from fix_die_repeat.config import Paths, Settings
 from fix_die_repeat.lang import filter_supported_languages, resolve_languages
 from fix_die_repeat.prompts import render_prompt
@@ -51,7 +52,7 @@ class ReviewManager:
 
     Handles:
     - Generating diffs for review
-    - Running pi to review changes
+    - Running agy to review changes
     - Processing review results and applying fixes
     - Checking for prohibited ruff rule ignores
     """
@@ -161,27 +162,27 @@ class ReviewManager:
 
         return pseudo_diff + "\n"
 
-    def run_pi_review(
+    def run_agent_review(
         self,
         diff_size: int,
-        run_pi_callback: Callable[..., tuple[int, str, str]],
+        run_agent_callback: Callable[..., tuple[int, str, str]],
         changed_files: list[str] | None = None,
     ) -> None:
-        """Run pi to review changes.
+        """Run agy to review changes.
 
         Args:
             diff_size: Size of the diff in bytes
-            run_pi_callback: Function to run pi (from PiRunner)
+            run_agent_callback: Function to run agy (from AgyRunner)
             changed_files: List of changed files for language detection (optional)
 
         """
-        self.logger.info("[Step 5] Running pi to review files...")
+        self.logger.info("[Step 5] Running agy to review files...")
 
-        pi_args = ["-p", "--tools", "read,write,grep,find,ls"]
-        review_prompt_prefix = self.build_review_prompt(diff_size, pi_args)
+        attachments: list[Path] = []
+        review_prompt_prefix = self.build_review_prompt(diff_size, attachments)
 
         if self.paths.review_file.exists():
-            pi_args.append(f"@{self.paths.review_file}")
+            attachments.append(self.paths.review_file)
 
         # Detect languages for language-specific checks
         if changed_files is None:
@@ -196,23 +197,27 @@ class ReviewManager:
             **self.paths.template_context(),
         )
 
-        returncode, _, _ = run_pi_callback(*pi_args, review_prompt)
+        returncode, _, _ = run_agent_callback(
+            AgentRole.REVIEW,
+            review_prompt,
+            attachments=attachments,
+        )
 
         if returncode != 0:
-            self.logger.info("pi review failed. Treating as no issues found.")
+            self.logger.info("agy review failed. Treating as no issues found.")
             self.paths.review_current_file.write_text("NO_ISSUES")
 
     def build_review_prompt(
-        self, diff_size: int, pi_args: list[str], *, file_list_attached: bool = False
+        self, diff_size: int, attachments: list[Path], *, file_list_attached: bool = False
     ) -> str:
         """Build review prompt based on diff size.
 
         Args:
             diff_size: Size of the diff in bytes
-            pi_args: List to append diff file to if within threshold
+            attachments: List to append diff file path to if within threshold
             file_list_attached: If True, caller is providing a scoped file list
                 separately (e.g. contextual review), so empty-diff should
-                instruct pi to review those files directly rather than force
+                instruct agy to review those files directly rather than force
                 NO_ISSUES.
 
         Returns:
@@ -223,7 +228,7 @@ class ReviewManager:
             self.logger.info("Review diff size exceeds threshold. Switching to PULL mode.")
             return (
                 f"The changes are too large to attach automatically ({diff_size} bytes). "
-                f"You MUST use the 'read' tool to inspect '{self.paths.diff_file}'.\n"
+                f"You MUST use the 'read_file' tool to inspect '{self.paths.diff_file}'.\n"
             )
 
         if diff_size == 0:
@@ -235,13 +240,13 @@ class ReviewManager:
                 return (
                     "No diff is available for this review (the diff could not be computed "
                     "or is empty). Review the scoped file list directly. If no files are "
-                    "available to inspect, write exactly NO_ISSUES.\n"
+                    "available to inspect, return verdict NO_ISSUES.\n"
                 )
-            self.logger.info("Review diff is empty. Instructing pi to write NO_ISSUES.")
+            self.logger.info("Review diff is empty. Instructing agy to report NO_ISSUES.")
             return (
                 "No diff is available for this review (the diff could not be computed or "
                 "is empty), and no changed-file list is attached in this review mode. "
-                "Do not assume any changes are available to inspect. Write exactly "
+                "Do not assume any changes are available to inspect. Return verdict "
                 "NO_ISSUES.\n"
             )
 
@@ -249,7 +254,7 @@ class ReviewManager:
             "Review diff size (%s bytes) is within limits. Attaching changes.diff.",
             diff_size,
         )
-        pi_args.append(f"@{self.paths.diff_file}")
+        attachments.append(self.paths.diff_file)
         return (
             f"I have attached '{self.paths.diff_file}' which contains the changes "
             "made in this session.\n"
@@ -312,14 +317,14 @@ class ReviewManager:
         self,
         iteration: int,
         start_sha: str,
-        run_pi_callback: Callable[..., tuple[int, str, str]],
+        run_agent_callback: Callable[..., tuple[int, str, str]],
     ) -> None:
         """Run local file review.
 
         Args:
             iteration: Current iteration number
             start_sha: Starting git commit SHA
-            run_pi_callback: Function to run pi (from PiRunner)
+            run_agent_callback: Function to run agy (from AgyRunner)
 
         """
         self.logger.info("[Step 4] Collecting changed and staged files...")
@@ -347,8 +352,8 @@ class ReviewManager:
         diff_size = get_file_size(self.paths.diff_file)
         self.logger.info("Generated review diff size: %s bytes", diff_size)
 
-        # Run pi review
-        self.run_pi_review(diff_size, run_pi_callback, changed_files)
+        # Run agy review
+        self.run_agent_review(diff_size, run_agent_callback, changed_files)
 
         # Append review entry
         self.append_review_entry(iteration)
@@ -356,18 +361,18 @@ class ReviewManager:
     def run_full_codebase_review(
         self,
         iteration: int,
-        run_pi_callback: Callable[..., tuple[int, str, str]],
+        run_agent_callback: Callable[..., tuple[int, str, str]],
     ) -> None:
         """Run a single report-only review pass over the entire tracked codebase.
 
         This is a single-pass operation: ``review.md`` is overwritten with the
         current run's findings (no ``## Iteration N`` stacking, no historical
-        context passed to pi).
+        context passed to agy).
 
         Args:
             iteration: Current iteration number (unused in single-pass mode,
                 kept for interface parity with ``run_local_review``).
-            run_pi_callback: Function to run pi (from PiRunner)
+            run_agent_callback: Function to run agy (from AgyRunner)
 
         """
         del iteration
@@ -386,22 +391,20 @@ class ReviewManager:
         languages = resolve_languages(tracked_files, self.settings.languages)
         languages = filter_supported_languages(languages)
 
-        pi_args = ["-p", "--tools", "read,write,grep,find,ls"]
-
         review_prompt = render_prompt(
             "full_codebase_review.j2",
             languages=sorted(languages),
             **self.paths.template_context(),
         )
 
-        self.logger.info("[Step 5] Running pi to audit full codebase...")
-        returncode, _, _ = run_pi_callback(*pi_args, review_prompt)
+        self.logger.info("[Step 5] Running agy to audit full codebase...")
+        returncode, _, _ = run_agent_callback(AgentRole.REVIEW, review_prompt)
 
         if returncode != 0:
-            self.logger.info("pi review failed. Treating as no issues found.")
+            self.logger.info("agy review failed. Treating as no issues found.")
             self.paths.review_current_file.write_text("NO_ISSUES")
 
-        # Copy the pi output verbatim into review.md (no iteration headers).
+        # Copy the review output verbatim into review.md (no iteration headers).
         if self.paths.review_current_file.exists():
             content = self.paths.review_current_file.read_text()
             if content.strip() and content.strip() != "NO_ISSUES":
@@ -414,7 +417,7 @@ class ReviewManager:
     def run_contextual_review(
         self,
         iteration: int,
-        run_pi_callback: Callable[..., tuple[int, str, str]],
+        run_agent_callback: Callable[..., tuple[int, str, str]],
     ) -> None:
         """Run a contextual review scoped to changed files.
 
@@ -425,13 +428,13 @@ class ReviewManager:
 
         Args:
             iteration: Current iteration number
-            run_pi_callback: Function to run pi (from PiRunner)
+            run_agent_callback: Function to run agy (from AgyRunner)
 
         """
         scope, files = determine_review_scope(self.project_root)
 
         if scope == ReviewScope.FULL:
-            self.run_full_codebase_review(iteration, run_pi_callback)
+            self.run_full_codebase_review(iteration, run_agent_callback)
             return
 
         self.logger.info(
@@ -473,9 +476,9 @@ class ReviewManager:
         languages = resolve_languages(files, self.settings.languages)
         languages = filter_supported_languages(languages)
 
-        # Build pi args and diff context
-        pi_args = ["-p", "--tools", "read,write,grep,find,ls"]
-        diff_context = self.build_review_prompt(diff_size, pi_args, file_list_attached=True)
+        # Build attachments and diff context
+        attachments: list[Path] = []
+        diff_context = self.build_review_prompt(diff_size, attachments, file_list_attached=True)
 
         review_prompt = render_prompt(
             "contextual_review.j2",
@@ -487,14 +490,18 @@ class ReviewManager:
             **self.paths.template_context(),
         )
 
-        self.logger.info("[Step 5] Running pi to review scoped changes...")
-        returncode, _, _ = run_pi_callback(*pi_args, review_prompt)
+        self.logger.info("[Step 5] Running agy to review scoped changes...")
+        returncode, _, _ = run_agent_callback(
+            AgentRole.REVIEW,
+            review_prompt,
+            attachments=attachments,
+        )
 
         if returncode != 0:
-            self.logger.info("pi review failed. Treating as no issues found.")
+            self.logger.info("agy review failed. Treating as no issues found.")
             self.paths.review_current_file.write_text("NO_ISSUES")
 
-        # Copy the pi output verbatim into review.md (no iteration headers).
+        # Copy the review output verbatim into review.md (no iteration headers).
         if self.paths.review_current_file.exists():
             content = self.paths.review_current_file.read_text()
             if content.strip() and content.strip() != "NO_ISSUES":

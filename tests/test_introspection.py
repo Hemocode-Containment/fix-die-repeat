@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fix_die_repeat.config import Paths, Settings, get_introspection_file_path
-from fix_die_repeat.runner import PiRunner
+from fix_die_repeat.runner import AgyRunner
 from fix_die_repeat.runner_introspection import (
     IntrospectionManager,
     IntrospectionYamlParams,
@@ -43,8 +43,8 @@ class TestCollectIntrospectionData:
     """Tests for PiRunner.collect_introspection_data method."""
 
     @pytest.fixture
-    def runner(self, tmp_path: Path) -> PiRunner:
-        """Create a PiRunner instance with temporary paths."""
+    def runner(self, tmp_path: Path) -> AgyRunner:
+        """Create an AgyRunner instance with temporary paths."""
         settings = Settings(pr_review=True, pr_review_introspect=True)  # type: ignore[call-arg]  # pydantic's populate_by_name=True allows field names; mypy needs pydantic-mypy plugin
         paths = Paths(project_root=tmp_path)
         paths.ensure_fdr_dir()
@@ -52,9 +52,9 @@ class TestCollectIntrospectionData:
         # Create minimal logger to avoid issues
         with patch("fix_die_repeat.runner.configure_logger") as mock_logger:
             mock_logger.return_value = MagicMock()
-            return PiRunner(settings, paths)
+            return AgyRunner(settings, paths)
 
-    def test_skips_without_pr_info(self, runner: PiRunner) -> None:
+    def test_skips_without_pr_info(self, runner: AgyRunner) -> None:
         """Test that introspection data collection skips when PR info is unavailable."""
         # Mock get_branch_name to return None
         with patch.object(runner, "get_branch_name", return_value=None):
@@ -63,7 +63,7 @@ class TestCollectIntrospectionData:
         # Data file should not be created
         assert not runner.paths.introspection_data_file.exists()
 
-    def test_collects_with_pr_info(self, runner: PiRunner) -> None:
+    def test_collects_with_pr_info(self, runner: AgyRunner) -> None:
         """Test that introspection data is collected when PR info is available."""
         # Create mock PR info
         pr_info = {"number": 123, "url": "https://github.com/owner/repo/pull/123"}
@@ -103,7 +103,7 @@ class TestCollectIntrospectionData:
         assert "outcome: fixed" in content
         assert "outcome: wont-fix" in content
 
-    def test_identifies_wont_fix_threads(self, runner: PiRunner) -> None:
+    def test_identifies_wont_fix_threads(self, runner: AgyRunner) -> None:
         """Test that won't-fix threads are correctly identified."""
         pr_info = {"number": 456, "url": "https://github.com/owner/repo/pull/456"}
 
@@ -128,20 +128,20 @@ class TestCollectIntrospectionData:
 
 
 class TestRunIntrospection:
-    """Tests for PiRunner.run_introspection method."""
+    """Tests for AgyRunner.run_introspection method."""
 
     @pytest.fixture
-    def runner(self, tmp_path: Path) -> PiRunner:
-        """Create a PiRunner instance with temporary paths."""
+    def runner(self, tmp_path: Path) -> AgyRunner:
+        """Create an AgyRunner instance with temporary paths."""
         settings = Settings(pr_review=True, pr_review_introspect=True)  # type: ignore[call-arg]  # pydantic's populate_by_name=True allows field names; mypy needs pydantic-mypy plugin
         paths = Paths(project_root=tmp_path)
         paths.ensure_fdr_dir()
 
         with patch("fix_die_repeat.runner.configure_logger") as mock_logger:
             mock_logger.return_value = MagicMock()
-            return PiRunner(settings, paths)
+            return AgyRunner(settings, paths)
 
-    def test_skips_without_thread_ids_file(self, runner: PiRunner) -> None:
+    def test_skips_without_thread_ids_file(self, runner: AgyRunner) -> None:
         """Test that introspection skips when no thread IDs file exists."""
         with patch.object(runner, "collect_introspection_data") as mock_collect:
             runner.run_introspection()
@@ -149,8 +149,8 @@ class TestRunIntrospection:
         # collect_introspection_data should not be called
         mock_collect.assert_not_called()
 
-    def test_skips_on_pi_failure(self, runner: PiRunner) -> None:
-        """Test that introspection skips gracefully when pi fails."""
+    def test_skips_on_pi_failure(self, runner: AgyRunner) -> None:
+        """Test that introspection skips gracefully when agent fails."""
         # Create cumulative thread IDs file
         runner.paths.cumulative_in_scope_threads_file.write_text("thread_1\n")
 
@@ -161,7 +161,7 @@ class TestRunIntrospection:
         with patch.object(runner, "collect_introspection_data"):
             with patch.object(runner, "get_branch_name", return_value="branch"):
                 with patch.object(runner, "get_pr_info", return_value=pr_info):
-                    with patch.object(runner, "run_pi_safe", return_value=(1, "", "error")):
+                    with patch.object(runner, "run_agent_safe", return_value=(1, "", "error")):
                         runner.run_introspection()
 
         # Global introspection file should not be modified
@@ -170,12 +170,12 @@ class TestRunIntrospection:
 
     def test_preserves_result_file_on_pi_failure(
         self,
-        runner: PiRunner,
+        runner: AgyRunner,
         tmp_path: Path,
     ) -> None:
-        """Regression: result file survives pi non-zero exit (e.g. killed).
+        """Regression: result file survives agent non-zero exit (e.g. killed).
 
-        When pi writes the result file but then returns non-zero, the file must
+        When agent writes the result file but then returns non-zero, the file must
         stay on disk so the analysis isn't lost.
         """
         runner.paths.cumulative_in_scope_threads_file.write_text("thread_1\n")
@@ -183,7 +183,7 @@ class TestRunIntrospection:
             "pr_number: 2\npr_url: https://github.com/test/test/pull/2\n"
         )
 
-        # Simulate pi writing the result file before its non-zero exit
+        # Simulate result file written before non-zero exit
         result_yaml = (
             "date: '2026-04-18'\nproject: 'test-project'\npr_number: 2\n"
             "pr_url: 'https://github.com/test/test/pull/2'\n"
@@ -204,18 +204,18 @@ class TestRunIntrospection:
                 "fix_die_repeat.runner_introspection.run_command",
                 return_value=(0, pr_json, ""),
             ):
-                with patch.object(runner, "run_pi_safe", return_value=(1, "", "killed")):
+                with patch.object(runner, "run_agent_safe", return_value=(1, "", "killed")):
                     runner.run_introspection()
 
-        # Result file must survive so pi's analysis is recoverable
+        # Result file must survive so analysis is recoverable
         assert runner.paths.introspection_result_file.exists(), (
-            "Result file was deleted despite pi failure — analysis is lost"
+            "Result file was deleted despite failure — analysis is lost"
         )
         assert runner.paths.introspection_result_file.read_text() == result_yaml
         # Input data file is disposable and should still be cleaned up
         assert not runner.paths.introspection_data_file.exists()
 
-    def test_skips_with_invalid_pr_info(self, runner: PiRunner) -> None:
+    def test_skips_with_invalid_pr_info(self, runner: AgyRunner) -> None:
         """Test that introspection skips when PR info is invalid."""
         runner.paths.cumulative_in_scope_threads_file.write_text("thread_1\n")
 
@@ -226,15 +226,15 @@ class TestRunIntrospection:
                 (0, "main\n", ""),
                 (0, pr_json, ""),
             ]
-            with patch.object(runner, "run_pi_safe") as mock_pi:
+            with patch.object(runner, "run_agent_safe") as mock_agent:
                 runner.run_introspection()
 
-        mock_pi.assert_not_called()
+        mock_agent.assert_not_called()
         assert not runner.paths.introspection_data_file.exists()
 
     def test_appends_to_global_file(
         self,
-        runner: PiRunner,
+        runner: AgyRunner,
         tmp_path: Path,
     ) -> None:
         """Test that valid introspection result is appended to global file."""
@@ -253,19 +253,18 @@ class TestRunIntrospection:
         test_global_file.parent.mkdir(parents=True, exist_ok=True)
         test_global_file.write_text("date: '2026-01-01'\nproject: 'old-project'\nstatus: pending\n")
 
-        # Mock successful pi execution
+        # Mock successful execution
         introspection_result = (
             "date: '2026-02-26'\nproject: 'test-project'\npr_number: 2\n"
             "pr_url: 'https://github.com/test/test/pull/2'\n"
             "status: pending\nthreads: []\n"
         )
 
-        # Create result file to simulate pi writing it
+        # Create result file
         runner.paths.introspection_result_file.write_text(introspection_result)
         pr_json = '{"number": 2, "url": "https://github.com/test/test/pull/2"}'
 
         # Call run_introspection which should read result file and append to global file
-        # Note: We need to mock the parts that would normally require GitHub/pi
         with patch(
             "fix_die_repeat.runner_introspection.get_introspection_file_path",
             return_value=test_global_file,
@@ -274,8 +273,7 @@ class TestRunIntrospection:
                 "fix_die_repeat.runner_introspection.run_command",
                 return_value=(0, pr_json, ""),
             ):
-                with patch.object(runner, "run_pi_safe", return_value=(0, "", "")):
-                    # Don't mock collect_introspection_data, we already created the file
+                with patch.object(runner, "run_agent_safe", return_value=(0, "", "")):
                     runner.run_introspection()
 
         # Verify result was appended with separator
@@ -286,7 +284,7 @@ class TestRunIntrospection:
 
     def test_normalizes_document_markers(
         self,
-        runner: PiRunner,
+        runner: AgyRunner,
         tmp_path: Path,
     ) -> None:
         """Test that leading/trailing YAML markers are removed before append."""
@@ -321,7 +319,7 @@ class TestRunIntrospection:
                     (0, "main\n", ""),
                     (0, pr_json, ""),
                 ]
-                with patch.object(runner, "run_pi_safe", return_value=(0, "", "")):
+                with patch.object(runner, "run_agent_safe", return_value=(0, "", "")):
                     runner.run_introspection()
 
         content = test_global_file.read_text()
@@ -330,7 +328,7 @@ class TestRunIntrospection:
 
     def test_validates_yaml_before_append(
         self,
-        runner: PiRunner,
+        runner: AgyRunner,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -362,7 +360,7 @@ class TestRunIntrospection:
                     "fix_die_repeat.runner_introspection.run_command",
                     return_value=(0, pr_json, ""),
                 ):
-                    with patch.object(runner, "run_pi_safe", return_value=(0, "", "")):
+                    with patch.object(runner, "run_agent_safe", return_value=(0, "", "")):
                         # Create invalid YAML result file
                         runner.paths.introspection_result_file.write_text(invalid_yaml)
                         runner.run_introspection()
@@ -433,7 +431,7 @@ class TestIntrospectionNonBlocking:
 
         with patch("fix_die_repeat.runner.configure_logger") as mock_logger:
             mock_logger.return_value = MagicMock()
-            runner = PiRunner(settings, paths)
+            runner = AgyRunner(settings, paths)
 
         # Should not raise even with missing files
         runner.collect_introspection_data(1, "abc123")
@@ -450,7 +448,7 @@ class TestIntrospectionNonBlocking:
 
         with patch("fix_die_repeat.runner.configure_logger") as mock_logger:
             mock_logger.return_value = MagicMock()
-            runner = PiRunner(settings, paths)
+            runner = AgyRunner(settings, paths)
 
         # Create thread IDs file to enable introspection prerequisites
         runner.paths.cumulative_in_scope_threads_file.write_text("thread_1\n")

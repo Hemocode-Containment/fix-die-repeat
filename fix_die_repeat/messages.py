@@ -116,9 +116,9 @@ def model_recommendations_header() -> str:
 def model_recommendation_items() -> str:
     """Return the list of recommended models."""
     return (
-        "  - anthropic/claude-sonnet-4-5 (recommended for code editing)\n"
-        "  - anthropic/claude-opus-4-6 (high capacity, more expensive)\n"
-        "  - github-copilot/gpt-5.2-codex (good for code generation)"
+        "  - claude-sonnet-5-5-high (recommended for code editing)\n"
+        "  - claude-opus-5-5-high (highest reasoning capacity)\n"
+        "  - gemini-4-argon-high (separate Gemini Argon quota pool)"
     )
 
 

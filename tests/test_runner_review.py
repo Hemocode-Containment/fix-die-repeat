@@ -3,8 +3,9 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from fix_die_repeat.agy_policy import AgentRole
 from fix_die_repeat.config import Paths, Settings
-from fix_die_repeat.runner import PiRunner
+from fix_die_repeat.runner import AgyRunner
 from fix_die_repeat.runner_review import ReviewManager
 from fix_die_repeat.utils import ReviewScope
 from tests.conftest import FAKE_TEMPLATE_CONTEXT
@@ -31,14 +32,14 @@ class TestRunReviewFixAttempt:
         paths.review_recent_file = tmp_path / "review_recent.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
         runner.consecutive_toolless_attempts = 0
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
         runner.resolve_pr_threads = MagicMock()  # type: ignore[method-assign]
 
         paths.review_current_file.write_text("[CRITICAL] Bug found")
@@ -52,15 +53,13 @@ class TestRunReviewFixAttempt:
             result = runner.run_review_fix_attempt(1, 3)
 
         assert result is True
-        assert runner.run_pi_safe.called
-        pi_args = runner.run_pi_safe.call_args.args
-        assert "--tools" in pi_args
-        assert "read,edit,write,bash,grep,find,ls" in pi_args
+        assert runner.run_agent_safe.called
+        assert runner.run_agent_safe.call_args.args[0] == AgentRole.FIX
         assert mock_git.call_args_list[0].kwargs["cwd"] == tmp_path
         assert mock_git.call_args_list[1].kwargs["cwd"] == tmp_path
 
     def test_run_review_fix_attempt_pi_fails(self, tmp_path: Path) -> None:
-        """Test running review fix attempt when pi fails."""
+        """Test running review fix attempt when agent fails."""
         settings = MagicMock()
         settings.model = "test-model"
         paths = MagicMock()
@@ -74,14 +73,14 @@ class TestRunReviewFixAttempt:
         paths.review_recent_file = tmp_path / "review_recent.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
         runner.consecutive_toolless_attempts = 0
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(1, "", "error"))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(1, "", "error"))  # type: ignore[method-assign]
 
         paths.review_current_file.write_text("[CRITICAL] Bug found")
 
@@ -108,14 +107,14 @@ class TestRunReviewFixAttempt:
         paths.review_recent_file = tmp_path / "review_recent.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
         runner.consecutive_toolless_attempts = 0
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
         runner.resolve_pr_threads = MagicMock()  # type: ignore[method-assign]
 
         paths.review_current_file.write_text("[CRITICAL] Bug found")
@@ -144,11 +143,11 @@ class TestResolvePrThreads:
         paths.pr_thread_ids_file = tmp_path / "pr_thread_ids"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
 
         runner.resolve_pr_threads()
 
@@ -166,11 +165,11 @@ class TestResolvePrThreads:
         paths.pr_thread_ids_file = tmp_path / "pr_thread_ids"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
 
         # Create empty file
         paths.pr_resolved_threads_file.write_text("")
@@ -191,11 +190,11 @@ class TestResolvePrThreads:
         paths.pr_thread_ids_file = tmp_path / "pr_thread_ids"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
 
         # Create resolved file with thread IDs
         paths.pr_resolved_threads_file.write_text("thread1\nthread2\n")
@@ -217,11 +216,11 @@ class TestResolvePrThreads:
         paths.pr_thread_ids_file = tmp_path / "pr_thread_ids"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
 
         # Create resolved file with thread IDs
         paths.pr_resolved_threads_file.write_text("thread1\nthread2\nthread3\n")
@@ -247,11 +246,11 @@ class TestResolvePrThreads:
         paths.pr_thread_ids_file = tmp_path / "pr_thread_ids"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
 
         # Create resolved file with thread IDs (some not in scope)
         paths.pr_resolved_threads_file.write_text("thread1\nthread2\nthread3\n")
@@ -280,11 +279,11 @@ class TestResolvePrThreads:
         paths.pi_log = tmp_path / "pi.log"
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
 
         # Create resolved file with thread IDs
         thread_id_1 = "PRRT_kwDORYGRb85wxpuZ"
@@ -341,11 +340,11 @@ class TestResolvePrThreads:
         paths.pi_log = tmp_path / "pi.log"
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
 
         # Create resolved file with thread IDs
         thread_id_1 = "PRRT_kwDORYGRb85wxpuZ"
@@ -391,11 +390,11 @@ class TestResolvePrThreads:
         paths.pi_log = tmp_path / "pi.log"
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
         runner.fetch_pr_threads = MagicMock()  # type: ignore[method-assign]
 
         # Create resolved file with thread IDs
@@ -433,11 +432,11 @@ class TestResolvePrThreads:
         paths.pi_log = tmp_path / "pi.log"
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
         runner.fetch_pr_threads = MagicMock()  # type: ignore[method-assign]
 
         # Create resolved file with thread IDs
@@ -481,11 +480,11 @@ class TestResolvePrThreads:
         paths.pi_log = tmp_path / "pi.log"
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
 
         # Create resolved file with thread IDs
         thread_id = "PRRT_kwDORYGRb85wxpuZ"
@@ -533,20 +532,12 @@ class TestRunFullCodebaseReview:
             "fix_die_repeat.runner_review.get_all_tracked_files",
             return_value=["fix_die_repeat/runner.py"],
         ):
-            manager.run_full_codebase_review(iteration=1, run_pi_callback=run_pi)
+            manager.run_full_codebase_review(iteration=1, run_agent_callback=run_pi)
 
         assert run_pi.called
-        pi_args = run_pi.call_args.args
-        assert "--tools" in pi_args
-        assert "read,write,grep,find,ls" in pi_args
-        # No diff attached in full-codebase mode
-        assert not any(isinstance(a, str) and a.endswith("changes.diff") for a in pi_args)
-        # No historical review.md attached — single-pass mode does not pass history.
-        assert not any(
-            isinstance(a, str) and a.startswith("@") and a.endswith("review.md") for a in pi_args
-        )
-        # Prompt text should reference full-codebase audit framing
-        prompt = pi_args[-1]
+        call_args = run_pi.call_args.args
+        assert call_args[0] == AgentRole.REVIEW
+        prompt = call_args[1]
         assert isinstance(prompt, str)
         assert "full-codebase audit" in prompt
         # review.md is overwritten with the fresh findings, not appended.
@@ -559,7 +550,7 @@ class TestRunFullCodebaseReview:
 
         findings = iter(["[CRITICAL] first run\n", "[CRITICAL] second run\n"])
 
-        def fake_run_pi(*_args: str, **_kwargs: object) -> tuple[int, str, str]:
+        def fake_run_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             manager.paths.review_current_file.write_text(next(findings))
             return (0, "", "")
 
@@ -569,15 +560,15 @@ class TestRunFullCodebaseReview:
             "fix_die_repeat.runner_review.get_all_tracked_files",
             return_value=["fix_die_repeat/runner.py"],
         ):
-            manager.run_full_codebase_review(iteration=1, run_pi_callback=run_pi)
-            manager.run_full_codebase_review(iteration=1, run_pi_callback=run_pi)
+            manager.run_full_codebase_review(iteration=1, run_agent_callback=run_pi)
+            manager.run_full_codebase_review(iteration=1, run_agent_callback=run_pi)
 
         content = manager.paths.review_file.read_text()
         assert content == "[CRITICAL] second run\n"
         assert "first run" not in content
 
     def test_pi_failure_writes_no_issues(self, tmp_path: Path) -> None:
-        """When pi fails we should still produce a NO_ISSUES marker."""
+        """When agent fails we should still produce a NO_ISSUES marker."""
         manager = self._make_manager(tmp_path)
         run_pi = MagicMock(return_value=(1, "", "boom"))
 
@@ -585,7 +576,7 @@ class TestRunFullCodebaseReview:
             "fix_die_repeat.runner_review.get_all_tracked_files",
             return_value=[],
         ):
-            manager.run_full_codebase_review(iteration=1, run_pi_callback=run_pi)
+            manager.run_full_codebase_review(iteration=1, run_agent_callback=run_pi)
 
         assert manager.paths.review_current_file.read_text() == "NO_ISSUES"
         assert manager.paths.review_file.read_text().strip() == "NO_ISSUES"
@@ -604,7 +595,7 @@ class TestRunContextualReview:
         """UNCOMMITTED scope generates a diff and passes correct template."""
         manager = self._make_manager(tmp_path)
 
-        def fake_run_pi(*_args: str, **_kwargs: object) -> tuple[int, str, str]:
+        def fake_run_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             manager.paths.review_current_file.write_text("[CRITICAL] issue\n")
             return (0, "", "")
 
@@ -623,10 +614,10 @@ class TestRunContextualReview:
             # Patch the enum comparison to work
 
             mock_scope.return_value = (ReviewScope.UNCOMMITTED, ["dirty.py"])
-            manager.run_contextual_review(iteration=1, run_pi_callback=run_pi)
+            manager.run_contextual_review(iteration=1, run_agent_callback=run_pi)
 
         assert run_pi.called
-        prompt = run_pi.call_args.args[-1]
+        prompt = run_pi.call_args.args[1]
         assert "uncommitted" in prompt.lower()
         assert "dirty.py" in prompt
         assert manager.paths.review_file.read_text() == "[CRITICAL] issue\n"
@@ -635,7 +626,7 @@ class TestRunContextualReview:
         """BRANCH scope renders correct template with default branch info."""
         manager = self._make_manager(tmp_path)
 
-        def fake_run_pi(*_args: str, **_kwargs: object) -> tuple[int, str, str]:
+        def fake_run_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             manager.paths.review_current_file.write_text("NO_ISSUES")
             return (0, "", "")
 
@@ -655,10 +646,10 @@ class TestRunContextualReview:
                 return_value=(0, "abc123\n", ""),
             ),
         ):
-            manager.run_contextual_review(iteration=1, run_pi_callback=run_pi)
+            manager.run_contextual_review(iteration=1, run_agent_callback=run_pi)
 
         assert run_pi.called
-        prompt = run_pi.call_args.args[-1]
+        prompt = run_pi.call_args.args[1]
         assert "branch" in prompt.lower()
         assert "main" in prompt
         assert "feature.py" in prompt
@@ -675,14 +666,14 @@ class TestRunContextualReview:
             ),
             patch.object(manager, "run_full_codebase_review") as mock_full,
         ):
-            manager.run_contextual_review(iteration=1, run_pi_callback=run_pi)
+            manager.run_contextual_review(iteration=1, run_agent_callback=run_pi)
 
         mock_full.assert_called_once_with(1, run_pi)
         # run_pi should NOT be called directly — full review handles that
         assert not run_pi.called
 
     def test_pi_failure_writes_no_issues(self, tmp_path: Path) -> None:
-        """When pi fails, NO_ISSUES is written."""
+        """When agent fails, NO_ISSUES is written."""
         manager = self._make_manager(tmp_path)
         run_pi = MagicMock(return_value=(1, "", "boom"))
 
@@ -696,7 +687,7 @@ class TestRunContextualReview:
                 return_value=(0, "fake diff\n", ""),
             ),
         ):
-            manager.run_contextual_review(iteration=1, run_pi_callback=run_pi)
+            manager.run_contextual_review(iteration=1, run_agent_callback=run_pi)
 
         assert manager.paths.review_current_file.read_text() == "NO_ISSUES"
         assert manager.paths.review_file.read_text().strip() == "NO_ISSUES"

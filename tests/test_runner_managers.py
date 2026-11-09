@@ -103,11 +103,11 @@ class TestReviewManager:
         logger = MagicMock()
         manager = ReviewManager(settings, paths, tmp_path, logger)
 
-        pi_args: list[str] = []
-        prompt = manager.build_review_prompt(diff_size=20, pi_args=pi_args)
+        attachments: list[Path] = []
+        prompt = manager.build_review_prompt(diff_size=20, attachments=attachments)
 
         assert "changes.diff" in prompt
-        assert pi_args == [f"@{paths.diff_file}"]
+        assert attachments == [paths.diff_file]
 
     def test_build_review_prompt_pull_mode(self, tmp_path: Path) -> None:
         """Skip diff attachment when over threshold."""
@@ -117,24 +117,24 @@ class TestReviewManager:
         logger = MagicMock()
         manager = ReviewManager(settings, paths, tmp_path, logger)
 
-        pi_args: list[str] = []
-        prompt = manager.build_review_prompt(diff_size=200, pi_args=pi_args)
+        attachments: list[Path] = []
+        prompt = manager.build_review_prompt(diff_size=200, attachments=attachments)
 
         assert "too large" in prompt
-        assert pi_args == []
+        assert attachments == []
 
     def test_build_review_prompt_empty_diff(self, tmp_path: Path) -> None:
-        """Empty diff must not attach the file and must tell pi no diff is available."""
+        """Empty diff must not attach the file and must tell agent no diff is available."""
         settings = Settings(auto_attach_threshold=5000)
         paths = Paths(project_root=tmp_path)
         paths.ensure_fdr_dir()
         logger = MagicMock()
         manager = ReviewManager(settings, paths, tmp_path, logger)
 
-        pi_args: list[str] = []
-        prompt = manager.build_review_prompt(diff_size=0, pi_args=pi_args)
+        attachments: list[Path] = []
+        prompt = manager.build_review_prompt(diff_size=0, attachments=attachments)
 
-        assert pi_args == []
+        assert attachments == []
         assert "No diff is available" in prompt
 
     def test_build_review_prompt_empty_diff_with_file_list(self, tmp_path: Path) -> None:
@@ -145,14 +145,18 @@ class TestReviewManager:
         logger = MagicMock()
         manager = ReviewManager(settings, paths, tmp_path, logger)
 
-        pi_args: list[str] = []
-        prompt = manager.build_review_prompt(diff_size=0, pi_args=pi_args, file_list_attached=True)
+        attachments: list[Path] = []
+        prompt = manager.build_review_prompt(
+            diff_size=0,
+            attachments=attachments,
+            file_list_attached=True,
+        )
 
-        assert pi_args == []
+        assert attachments == []
         assert "Write exactly NO_ISSUES" not in prompt
         assert "scoped file list" in prompt
 
-    def test_run_pi_review_failure_marks_no_issues(self, tmp_path: Path) -> None:
+    def test_run_agent_review_failure_marks_no_issues(self, tmp_path: Path) -> None:
         """Review failures should mark review_current as NO_ISSUES."""
         settings = Settings(auto_attach_threshold=5000)
         paths = Paths(project_root=tmp_path)
@@ -163,11 +167,11 @@ class TestReviewManager:
         logger = MagicMock()
         manager = ReviewManager(settings, paths, tmp_path, logger)
 
-        run_pi_callback = MagicMock(return_value=(1, "", "error"))
+        run_agent_callback = MagicMock(return_value=(1, "", "error"))
 
-        manager.run_pi_review(diff_size=10, run_pi_callback=run_pi_callback)
+        manager.run_agent_review(diff_size=10, run_agent_callback=run_agent_callback)
 
-        assert run_pi_callback.called
+        assert run_agent_callback.called
         assert paths.review_current_file.read_text() == "NO_ISSUES"
 
     def test_run_local_review_no_changes_records_review_entry(self, tmp_path: Path) -> None:
@@ -177,13 +181,13 @@ class TestReviewManager:
         paths.ensure_fdr_dir()
         logger = MagicMock()
         manager = ReviewManager(settings, paths, tmp_path, logger)
-        run_pi_callback = MagicMock()
+        run_agent_callback = MagicMock()
 
         with patch("fix_die_repeat.runner_review.get_changed_files", return_value=[]):
             manager.run_local_review(
                 iteration=2,
                 start_sha="abc123",
-                run_pi_callback=run_pi_callback,
+                run_agent_callback=run_agent_callback,
             )
 
         assert paths.review_current_file.read_text() == "NO_ISSUES"
@@ -191,7 +195,7 @@ class TestReviewManager:
         review_content = paths.review_file.read_text()
         assert "Iteration 2 - Review" in review_content
         assert "NO_ISSUES" in review_content
-        assert not run_pi_callback.called
+        assert not run_agent_callback.called
 
     def test_check_prohibited_ruff_ignores_parse_error(self, tmp_path: Path) -> None:
         """Invalid ruff config should raise a validation error."""

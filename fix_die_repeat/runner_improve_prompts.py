@@ -2,9 +2,9 @@
 
 Drives the ``--improve-prompts`` mode: reads accumulated PR review
 introspection data, copies (on-demand) the shipped prompt templates into
-the user dotfolder, and asks pi to edit the user copies so future runs
-pick up the improvements. Nothing inside the installed package is ever
-mutated.
+the user dotfolder, and asks Antigravity (``agy``) to edit the user copies
+so future runs pick up the improvements. Nothing inside the installed
+package is ever mutated.
 """
 
 import difflib
@@ -16,7 +16,9 @@ from importlib import resources
 from pathlib import Path
 
 import yaml
+from jinja2 import Environment, TemplateSyntaxError, select_autoescape
 
+from fix_die_repeat.agy_policy import AgentRole
 from fix_die_repeat.config import (
     Settings,
     get_introspection_archive_file_path,
@@ -29,7 +31,7 @@ from fix_die_repeat.runner_introspection import _FileLock
 _SUMMARY_OPEN = "<IMPROVE_PROMPTS_SUMMARY>"
 _SUMMARY_CLOSE = "</IMPROVE_PROMPTS_SUMMARY>"
 
-# Templates exposed to pi for editing. Kept intentionally narrow: the
+# Templates exposed to agy for editing. Kept intentionally narrow: the
 # four top-level language-agnostic prompts that steer every run, plus the
 # shared ``partials/`` fragments those prompts compose. Per-language
 # partials under ``lang_checks/`` are deliberately excluded.
@@ -46,19 +48,29 @@ EDITABLE_TEMPLATES = (
     "partials/_review_output_contract.j2",
 )
 
-# Non-zero exit code returned when pi succeeds but leaves the introspection
-# or archive file unparseable, so the user notices the rollback.
+# Non-zero exit code returned when agy succeeds but leaves the introspection,
+# archive, or user templates unparseable, so the user notices the rollback.
 _ROLLBACK_EXIT_CODE = 1
 
 
 @dataclass(frozen=True)
-class _RunPiResult:
-    """Outcome of ``_run_pi_with_rollback``, with counts captured under the file lock."""
+class _RunAgentResult:
+    """Outcome of ``_run_agent_with_rollback``, with counts captured under the file lock."""
 
     returncode: int
     pending_before: int
     pending_after: int
     stdout: str
+
+
+@dataclass(frozen=True)
+class _RollbackContext:
+    """Files and snapshots guarded during an ``--improve-prompts`` agent turn."""
+
+    introspection_file: Path
+    archive_file: Path
+    template_paths: dict[str, Path]
+    template_snapshot: dict[str, str]
 
 
 class ImprovePromptsManager:
@@ -92,12 +104,12 @@ class ImprovePromptsManager:
 
     def run_improve_prompts(
         self,
-        run_pi_callback: Callable[..., tuple[int, str, str]],
+        run_agent_callback: Callable[..., tuple[int, str, str]],
     ) -> int:
         """Run the prompt-improvement mode.
 
         Args:
-            run_pi_callback: Function to invoke pi (from ``PiRunner``).
+            run_agent_callback: Function to invoke agy (from ``AgyRunner``).
 
         Returns:
             Exit code (0 on success, non-zero on failure).
@@ -129,12 +141,17 @@ class ImprovePromptsManager:
         )
 
         self.logger.info(
-            "[ImprovePrompts] Asking pi to review introspection data and update user templates...",
+            "[ImprovePrompts] Asking agy to review introspection data and update user templates...",
         )
-        result = self._run_pi_with_rollback(
+        rollback_ctx = _RollbackContext(
             introspection_file=introspection_file,
             archive_file=archive_file,
-            run_pi_callback=run_pi_callback,
+            template_paths=template_paths,
+            template_snapshot=template_snapshot,
+        )
+        result = self._run_agent_with_rollback(
+            context=rollback_ctx,
+            run_agent_callback=run_agent_callback,
             prompt=prompt,
         )
 
@@ -144,7 +161,8 @@ class ImprovePromptsManager:
 
         if result.returncode != 0:
             self.logger.warning(
-                "[ImprovePrompts] pi exited with code %s; user templates may be partially updated.",
+                "[ImprovePrompts] agy exited with code %s; "
+                "user templates may be partially updated.",
                 result.returncode,
             )
             return result.returncode
@@ -159,26 +177,24 @@ class ImprovePromptsManager:
         )
         return 0
 
-    def _run_pi_with_rollback(
+    def _run_agent_with_rollback(
         self,
         *,
-        introspection_file: Path,
-        archive_file: Path,
-        run_pi_callback: Callable[..., tuple[int, str, str]],
+        context: _RollbackContext,
+        run_agent_callback: Callable[..., tuple[int, str, str]],
         prompt: str,
-    ) -> _RunPiResult:
-        """Hold an exclusive lock on the introspection file for the pi call.
+    ) -> _RunAgentResult:
+        """Hold an exclusive lock on the introspection file for the agy call.
 
         Acquires ``_FileLock`` on ``introspection.yaml`` so a concurrent FDR
         process appending introspection entries serializes with us. Takes a
-        backup of both the main and archive files before invoking pi, and
-        rolls back if pi leaves either file unparseable. Returns the
-        before/after pending counts captured inside the lock so the summary
-        reflects this invocation's exact state rather than an interleaved view.
+        backup of both the main and archive files before invoking agy, and
+        rolls back if agy leaves either file or any edited template
+        unparseable. Returns the before/after pending counts captured inside
+        the lock so the summary reflects this invocation's exact state.
         """
-        # Open in r+ so we can hold an exclusive flock without truncating pi's
-        # edits. pi rewrites the file in place via its own open(...) calls; our
-        # handle exists only to anchor the flock.
+        introspection_file = context.introspection_file
+        archive_file = context.archive_file
         try:
             lock_handle = introspection_file.open("r+")
         except OSError:
@@ -186,7 +202,7 @@ class ImprovePromptsManager:
                 "[ImprovePrompts] Failed to open introspection file %s for locking",
                 introspection_file,
             )
-            return _RunPiResult(_ROLLBACK_EXIT_CODE, 0, 0, "")
+            return _RunAgentResult(_ROLLBACK_EXIT_CODE, 0, 0, "")
 
         with lock_handle, _FileLock(lock_handle):
             pending_before = self._count_pending_entries(introspection_file)
@@ -195,43 +211,98 @@ class ImprovePromptsManager:
             archive_backup = self._create_backup(archive_file) if archive_existed else None
 
             try:
-                returncode, stdout, _stderr = run_pi_callback(
-                    "-p",
-                    "--tools",
-                    "read,write,edit",
+                returncode, stdout, _stderr = run_agent_callback(
+                    AgentRole.IMPROVE_PROMPTS,
                     prompt,
                 )
-                introspection_exists = introspection_file.exists()
-                archive_exists = archive_file.exists()
-                introspection_invalid = not introspection_exists or not self._is_valid_yaml(
-                    introspection_file
-                )
-                archive_invalid = (archive_existed and not archive_exists) or (
-                    archive_exists and not self._is_valid_yaml(archive_file)
-                )
-                if introspection_invalid or archive_invalid:
-                    self.logger.error(
-                        "[ImprovePrompts] pi left %s or %s missing or unparseable; rolling back.",
-                        introspection_file,
-                        archive_file,
-                    )
-                    self._restore_backup(introspection_file, main_backup)
-                    self._restore_archive(
-                        archive_file,
-                        archive_backup,
-                        archive_existed_before=archive_existed,
+                if self._needs_rollback(context, archive_existed=archive_existed):
+                    self._perform_rollback(
+                        context,
+                        main_backup=main_backup,
+                        archive_backup=archive_backup,
+                        archive_existed=archive_existed,
                     )
                     if returncode == 0:
                         returncode = _ROLLBACK_EXIT_CODE
                     pending_after = pending_before
                 else:
                     pending_after = self._count_pending_entries(introspection_file)
-                return _RunPiResult(returncode, pending_before, pending_after, stdout)
+                return _RunAgentResult(returncode, pending_before, pending_after, stdout)
             finally:
                 if main_backup is not None and main_backup.exists():
                     main_backup.unlink()
                 if archive_backup is not None and archive_backup.exists():
                     archive_backup.unlink()
+
+    def _needs_rollback(
+        self,
+        context: _RollbackContext,
+        *,
+        archive_existed: bool,
+    ) -> bool:
+        """Return True if YAML state files or Jinja2 templates were left invalid."""
+        introspection_exists = context.introspection_file.exists()
+        archive_exists = context.archive_file.exists()
+        introspection_invalid = not introspection_exists or not self._is_valid_yaml(
+            context.introspection_file
+        )
+        archive_invalid = (archive_existed and not archive_exists) or (
+            archive_exists and not self._is_valid_yaml(context.archive_file)
+        )
+        templates_invalid = not self._are_templates_valid_jinja(context.template_paths)
+        return introspection_invalid or archive_invalid or templates_invalid
+
+    def _perform_rollback(
+        self,
+        context: _RollbackContext,
+        *,
+        main_backup: Path | None,
+        archive_backup: Path | None,
+        archive_existed: bool,
+    ) -> None:
+        """Restore YAML files and user templates after a failed validation check."""
+        self.logger.error(
+            "[ImprovePrompts] agy left %s, %s, or templates invalid; rolling back.",
+            context.introspection_file,
+            context.archive_file,
+        )
+        self._restore_backup(context.introspection_file, main_backup)
+        self._restore_archive(
+            context.archive_file,
+            archive_backup,
+            archive_existed_before=archive_existed,
+        )
+        self._restore_templates(context.template_paths, context.template_snapshot)
+
+    def _are_templates_valid_jinja(self, template_paths: dict[str, Path]) -> bool:
+        """Verify that every editable user template compiles as valid Jinja2 syntax."""
+        env = Environment(autoescape=select_autoescape(enabled_extensions=("html", "htm")))
+        for name, path in template_paths.items():
+            if not path.exists():
+                self.logger.warning("[ImprovePrompts] Template %s was deleted", path)
+                return False
+            try:
+                source = path.read_text(encoding="utf-8")
+                env.parse(source, name=name)
+            except (OSError, TemplateSyntaxError) as exc:
+                self.logger.warning(
+                    "[ImprovePrompts] Template %s failed Jinja2 syntax validation: %s",
+                    name,
+                    exc,
+                )
+                return False
+        return True
+
+    @staticmethod
+    def _restore_templates(
+        template_paths: dict[str, Path],
+        snapshot: dict[str, str],
+    ) -> None:
+        """Restore user templates from their pre-turn snapshot."""
+        for name, path in template_paths.items():
+            if name in snapshot:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(snapshot[name], encoding="utf-8")
 
     @staticmethod
     def _create_backup(source: Path) -> Path | None:
@@ -273,10 +344,10 @@ class ImprovePromptsManager:
         *,
         archive_existed_before: bool,
     ) -> None:
-        """Restore the archive file to its pre-pi state.
+        """Restore the archive file to its pre-agy state.
 
-        If the archive existed before pi ran, restore from its backup. If it
-        didn't exist before, delete any file pi created so we don't leave a
+        If the archive existed before agy ran, restore from its backup. If it
+        didn't exist before, delete any file agy created so we don't leave a
         half-formed archive behind.
         """
         if archive_existed_before:
@@ -317,7 +388,7 @@ class ImprovePromptsManager:
 
     @staticmethod
     def _snapshot_templates(template_paths: dict[str, Path]) -> dict[str, str]:
-        """Read each template's current content so we can diff post-pi."""
+        """Read each template's current content so we can diff post-agy."""
         snapshot: dict[str, str] = {}
         for name, path in template_paths.items():
             try:
@@ -349,7 +420,7 @@ class ImprovePromptsManager:
         template_paths: dict[str, Path],
         snapshot: dict[str, str],
     ) -> list[tuple[str, int, int]]:
-        """Return (name, added, removed) for every template pi modified.
+        """Return (name, added, removed) for every template agy modified.
 
         Uses unified-diff counts so an in-place rewrite that preserves line
         count still surfaces as non-zero edits (e.g. ``+7 -7``), unlike a
@@ -386,8 +457,8 @@ class ImprovePromptsManager:
         return changes
 
     @staticmethod
-    def _extract_pi_summary(stdout: str) -> list[str] | None:
-        """Return the non-empty lines inside pi's summary markers, or ``None``.
+    def _extract_agent_summary(stdout: str) -> list[str] | None:
+        """Return the non-empty lines inside agy's summary markers, or ``None``.
 
         ``None`` signals either that ``stdout`` was empty or that the marker
         contract was violated (open missing, close missing, or close before
@@ -409,9 +480,9 @@ class ImprovePromptsManager:
         self,
         changes: list[tuple[str, int, int]],
         entries_consumed: int,
-        pi_stdout: str,
+        agent_stdout: str,
     ) -> None:
-        """Log a human-readable summary of template edits, counts, and pi's rationale."""
+        """Log a human-readable summary of template edits, counts, and agy's rationale."""
         entries_word = "entry" if entries_consumed == 1 else "entries"
         if not changes:
             self.logger.info(
@@ -419,7 +490,7 @@ class ImprovePromptsManager:
                 entries_consumed,
                 entries_word,
             )
-            self._emit_pi_rationale(pi_stdout)
+            self._emit_agent_rationale(agent_stdout)
             return
         templates_word = "template" if len(changes) == 1 else "templates"
         self.logger.info(
@@ -436,26 +507,26 @@ class ImprovePromptsManager:
                 added,
                 removed,
             )
-        self._emit_pi_rationale(pi_stdout)
+        self._emit_agent_rationale(agent_stdout)
 
-    def _emit_pi_rationale(self, pi_stdout: str) -> None:
-        """Echo pi's marked summary block, or warn once if markers are absent.
+    def _emit_agent_rationale(self, agent_stdout: str) -> None:
+        """Echo agy's marked summary block, or warn once if markers are absent.
 
         Empty/whitespace-only stdout is treated as "no rationale provided" and
         skipped silently — the marker-contract WARNING is reserved for cases
-        where pi emitted output but failed to wrap it in the expected markers.
+        where agy emitted output but failed to wrap it in the expected markers.
         """
-        if not pi_stdout or not pi_stdout.strip():
+        if not agent_stdout or not agent_stdout.strip():
             return
-        rationale = self._extract_pi_summary(pi_stdout)
+        rationale = self._extract_agent_summary(agent_stdout)
         if rationale is None:
             self.logger.warning(
-                "[ImprovePrompts] pi did not wrap its summary in the expected markers; "
-                "skipping rationale echo. See pi.log for the raw output.",
+                "[ImprovePrompts] agy did not wrap its summary in the expected markers; "
+                "skipping rationale echo. See agy.log for the raw output.",
             )
             return
         for line in rationale:
-            self.logger.info("[ImprovePrompts]   pi: %s", line)
+            self.logger.info("[ImprovePrompts]   agy: %s", line)
 
     def _ensure_user_templates(self, templates_dir: Path) -> dict[str, Path]:
         """Ensure the editable templates exist under ``templates_dir``.

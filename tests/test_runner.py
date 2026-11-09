@@ -7,15 +7,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from fix_die_repeat import runner_introspection as runner_introspection_module
-from fix_die_repeat.runner import PiRunner
+from fix_die_repeat.runner import AgyRunner
 from fix_die_repeat.runner_introspection import (  # Testing private class is intentional
     _FileLock,
 )
 from tests.conftest import FAKE_TEMPLATE_CONTEXT
 
 # Constants for runner test values
-TEST_PI_DELAY_SECONDS = 2
-EXPECTED_PI_INVOCATION_COUNT = 2
+TEST_AGENT_DELAY_SECONDS = 2
+EXPECTED_AGENT_INVOCATION_COUNT = 2
 EMERGENCY_COMPACT_LINES = 100
 REGULAR_COMPACT_LINES = 50
 FILTERED_CHECKS_LOG_SMALL_LINES = 100
@@ -26,8 +26,8 @@ MIN_SEEK_CALLS = 2
 _FAKE_TEMPLATE_CONTEXT = FAKE_TEMPLATE_CONTEXT
 
 
-class TestBeforePiCall:
-    """Tests for before_pi_call method."""
+class TestBeforeAgentCall:
+    """Tests for before_agent_call method."""
 
     def test_first_call_no_delay(self, tmp_path: Path) -> None:
         """Test that first call doesn't add delay."""
@@ -35,36 +35,36 @@ class TestBeforePiCall:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
-        runner.pi_invocation_count = 0
+        runner.agent_invocation_count = 0
 
         with patch("fix_die_repeat.runner.time.sleep") as mock_sleep:
-            runner.before_pi_call()
+            runner.before_agent_call()
             assert not mock_sleep.called
-            assert runner.pi_invocation_count == 1
+            assert runner.agent_invocation_count == 1
 
     def test_subsequent_call_adds_delay(self, tmp_path: Path) -> None:
         """Test that subsequent calls add delay."""
         settings = MagicMock()
-        settings.pi_sequential_delay_seconds = TEST_PI_DELAY_SECONDS
+        settings.agent_sequential_delay_seconds = TEST_AGENT_DELAY_SECONDS
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
-        runner.pi_invocation_count = 1
+        runner.agent_invocation_count = 1
 
         with patch("fix_die_repeat.runner.time.sleep") as mock_sleep:
-            runner.before_pi_call()
-            mock_sleep.assert_called_once_with(TEST_PI_DELAY_SECONDS)
-            assert runner.pi_invocation_count == EXPECTED_PI_INVOCATION_COUNT
+            runner.before_agent_call()
+            mock_sleep.assert_called_once_with(TEST_AGENT_DELAY_SECONDS)
+            assert runner.agent_invocation_count == EXPECTED_AGENT_INVOCATION_COUNT
 
 
 class TestGenerateDiff:
@@ -76,9 +76,9 @@ class TestGenerateDiff:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.start_sha = "abc123"
@@ -97,9 +97,9 @@ class TestGenerateDiff:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.start_sha = ""
@@ -122,9 +122,9 @@ class TestCreatePseudoDiff:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -146,9 +146,9 @@ class TestCreatePseudoDiff:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -176,9 +176,9 @@ class TestAppendReviewEntry:
         paths.fdr_dir = tmp_path
         paths.review_file = tmp_path / "review.md"
         paths.review_current_file = tmp_path / "review_current.md"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
@@ -202,9 +202,9 @@ class TestAppendReviewEntry:
         paths.fdr_dir = tmp_path
         paths.review_file = tmp_path / "review.md"
         paths.review_current_file = tmp_path / "review_current.md"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 2
@@ -236,15 +236,15 @@ class TestRunFixAttempt:
         paths.checks_log = tmp_path / "checks.log"
         paths.review_file = tmp_path / "review.md"
         paths.build_history_file = tmp_path / "build_history.md"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
         runner.check_oscillation = MagicMock(return_value="Oscillation detected!")  # type: ignore[method-assign]
         runner.filter_checks_log = MagicMock()  # type: ignore[method-assign]
 
@@ -260,8 +260,8 @@ class TestRunFixAttempt:
             "",
         )
 
-        # Should have called run_pi_safe
-        assert runner.run_pi_safe.called
+        # Should have called run_agent_safe
+        assert runner.run_agent_safe.called
 
     def test_run_fix_attempt_pi_failure(self, tmp_path: Path) -> None:
         """Test fix attempt when pi fails."""
@@ -275,15 +275,15 @@ class TestRunFixAttempt:
         paths.checks_log = tmp_path / "checks.log"
         paths.review_file = tmp_path / "review.md"
         paths.build_history_file = tmp_path / "build_history.md"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(1, "", "error"))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(1, "", "error"))  # type: ignore[method-assign]
         runner.check_oscillation = MagicMock(return_value=None)  # type: ignore[method-assign]
         runner.filter_checks_log = MagicMock()  # type: ignore[method-assign]
 
@@ -317,15 +317,15 @@ class TestRunFixAttempt:
         paths.checks_log = tmp_path / "checks.log"
         paths.review_file = tmp_path / "review.md"
         paths.build_history_file = tmp_path / "build_history.md"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
         runner.check_oscillation = MagicMock(return_value=None)  # type: ignore[method-assign]
         runner.filter_checks_log = MagicMock()  # type: ignore[method-assign]
 
@@ -342,8 +342,8 @@ class TestRunFixAttempt:
             "",
         )
 
-        # Should have called run_pi_safe
-        assert runner.run_pi_safe.called
+        # Should have called run_agent_safe
+        assert runner.run_agent_safe.called
 
     def test_run_fix_attempt_with_build_history(self, tmp_path: Path) -> None:
         """Test fix attempt with build history."""
@@ -357,15 +357,15 @@ class TestRunFixAttempt:
         paths.checks_log = tmp_path / "checks.log"
         paths.review_file = tmp_path / "review.md"
         paths.build_history_file = tmp_path / "build_history.md"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
         runner.check_oscillation = MagicMock(return_value=None)  # type: ignore[method-assign]
         runner.filter_checks_log = MagicMock()  # type: ignore[method-assign]
 
@@ -382,8 +382,8 @@ class TestRunFixAttempt:
             "",
         )
 
-        # Should have called run_pi_safe
-        assert runner.run_pi_safe.called
+        # Should have called run_agent_safe
+        assert runner.run_agent_safe.called
 
     def test_run_fix_attempt_push_mode(self, tmp_path: Path) -> None:
         """Test fix attempt in push mode."""
@@ -397,15 +397,15 @@ class TestRunFixAttempt:
         paths.checks_log = tmp_path / "checks.log"
         paths.review_file = tmp_path / "review.md"
         paths.build_history_file = tmp_path / "build_history.md"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
         runner.check_oscillation = MagicMock(return_value=None)  # type: ignore[method-assign]
         runner.filter_checks_log = MagicMock()  # type: ignore[method-assign]
 
@@ -427,8 +427,8 @@ class TestRunFixAttempt:
             "",
         )
 
-        # Should have called run_pi_safe with file attachments
-        assert runner.run_pi_safe.called
+        # Should have called run_agent_safe with file attachments
+        assert runner.run_agent_safe.called
 
     def test_run_fix_attempt_pull_mode(self, tmp_path: Path) -> None:
         """Test fix attempt in pull mode."""
@@ -442,15 +442,15 @@ class TestRunFixAttempt:
         paths.checks_log = tmp_path / "checks.log"
         paths.review_file = tmp_path / "review.md"
         paths.build_history_file = tmp_path / "build_history.md"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
         runner.check_oscillation = MagicMock(return_value=None)  # type: ignore[method-assign]
         runner.filter_checks_log = MagicMock()  # type: ignore[method-assign]
 
@@ -468,8 +468,8 @@ class TestRunFixAttempt:
             "",
         )
 
-        # Should have called run_pi_safe
-        assert runner.run_pi_safe.called
+        # Should have called run_agent_safe
+        assert runner.run_agent_safe.called
 
 
 class TestPrepareFixContext:
@@ -483,9 +483,9 @@ class TestPrepareFixContext:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -514,9 +514,9 @@ class TestPrepareFixContext:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -547,9 +547,9 @@ class TestPrepareFixContext:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -583,9 +583,9 @@ class TestFormatPrThreads:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -618,9 +618,9 @@ class TestFormatPrThreads:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -647,9 +647,9 @@ class TestFormatPrThreads:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -677,9 +677,9 @@ class TestFormatPrThreads:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -706,9 +706,9 @@ class TestFormatPrThreads:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -745,19 +745,19 @@ class TestBuildReviewPrompt:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
 
-        pi_args: list[str] = []
-        result = runner.build_review_prompt(200000, pi_args)
+        attachments: list[Path] = []
+        result = runner.build_review_prompt(200000, attachments)
 
         assert "too large to attach" in result
-        assert "MUST use the 'read' tool" in result
-        assert len(pi_args) == 0  # Should not append diff file
+        assert "MUST use the 'read_file' tool" in result
+        assert len(attachments) == 0  # Should not append diff file
 
     def test_build_review_prompt_push_mode(self, tmp_path: Path) -> None:
         """Test building review prompt in push mode."""
@@ -766,102 +766,102 @@ class TestBuildReviewPrompt:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
         # Create actual diff file
         diff_file = tmp_path / "changes.diff"
         paths.diff_file = diff_file
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
 
-        pi_args: list[str] = []
-        result = runner.build_review_prompt(100000, pi_args)
+        attachments: list[Path] = []
+        result = runner.build_review_prompt(100000, attachments)
 
         assert "changes.diff" in result
-        assert len(pi_args) == 1
-        assert "changes.diff" in pi_args[0]
+        assert len(attachments) == 1
+        assert attachments[0] == diff_file
 
 
-class TestRunPiReview:
-    """Tests for run_pi_review method."""
+class TestRunAgentReview:
+    """Tests for run_agent_review method."""
 
-    def test_run_pi_review_push_mode(self, tmp_path: Path) -> None:
-        """Test running pi review in push mode."""
+    def test_run_agent_review_push_mode(self, tmp_path: Path) -> None:
+        """Test running agent review in push mode."""
         settings = MagicMock()
         settings.auto_attach_threshold = 200000
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
         paths.review_file = tmp_path / "review.md"
         paths.diff_file = tmp_path / "changes.diff"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
 
         # Create diff file
         paths.diff_file.write_text("diff content")
 
-        runner.run_pi_review(100000, runner.run_pi_safe)  # type: ignore[arg-type]
+        runner.run_agent_review(100000, runner.run_agent_safe)  # type: ignore[arg-type]
 
-        # Check that run_pi_safe was called
-        assert runner.run_pi_safe.called
+        # Check that run_agent_safe was called
+        assert runner.run_agent_safe.called
 
-    def test_run_pi_review_pull_mode(self, tmp_path: Path) -> None:
-        """Test running pi review in pull mode."""
+    def test_run_agent_review_pull_mode(self, tmp_path: Path) -> None:
+        """Test running agent review in pull mode."""
         settings = MagicMock()
         settings.auto_attach_threshold = 100000
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
         paths.review_file = tmp_path / "review.md"
         paths.diff_file = tmp_path / "changes.diff"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
 
-        runner.run_pi_review(200000, runner.run_pi_safe)  # type: ignore[arg-type]
+        runner.run_agent_review(200000, runner.run_agent_safe)  # type: ignore[arg-type]
 
-        # Check that run_pi_safe was called
-        assert runner.run_pi_safe.called
+        # Check that run_agent_safe was called
+        assert runner.run_agent_safe.called
 
-    def test_run_pi_review_with_history(self, tmp_path: Path) -> None:
-        """Test running pi review with existing history."""
+    def test_run_agent_review_with_history(self, tmp_path: Path) -> None:
+        """Test running agent review with existing history."""
         settings = MagicMock()
         settings.auto_attach_threshold = 200000
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
         paths.review_file = tmp_path / "review.md"
         paths.diff_file = tmp_path / "changes.diff"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
-        runner.before_pi_call = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.before_agent_call = MagicMock()  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
 
         # Create review history
         paths.review_file.write_text("# Previous review\n\nIssues found.")
 
-        runner.run_pi_review(100000, runner.run_pi_safe)  # type: ignore[arg-type]
+        runner.run_agent_review(100000, runner.run_agent_safe)  # type: ignore[arg-type]
 
-        # Check that run_pi_safe was called
-        assert runner.run_pi_safe.called
+        # Check that run_agent_safe was called
+        assert runner.run_agent_safe.called
 
 
 class TestGetBranchName:
@@ -873,9 +873,9 @@ class TestGetBranchName:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -892,9 +892,9 @@ class TestGetBranchName:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -911,9 +911,9 @@ class TestGetBranchName:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -934,9 +934,9 @@ class TestGetPrInfo:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -964,9 +964,9 @@ class TestGetPrInfo:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -991,9 +991,9 @@ class TestCheckPrThreadsCache:
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
         paths.review_current_file = tmp_path / "review_current.md"
         paths.pr_thread_ids_file = tmp_path / "pr_thread_ids"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1018,9 +1018,9 @@ class TestCheckPrThreadsCache:
         paths.pr_threads_cache = tmp_path / "pr_threads_cache"
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
         paths.review_current_file = tmp_path / "review_current.md"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1042,9 +1042,9 @@ class TestCheckPrThreadsCache:
         paths.pr_threads_cache = tmp_path / "pr_threads_cache"
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
         paths.review_current_file = tmp_path / "review_current.md"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -1062,9 +1062,9 @@ class TestFetchPrThreadsGql:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1109,9 +1109,9 @@ class TestFetchPrThreadsGql:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -1128,9 +1128,9 @@ class TestFetchPrThreadsGql:
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.fdr_dir = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1149,11 +1149,11 @@ class TestHasNoReviewIssues:
 
     def test_no_issues_marker(self) -> None:
         """Test that NO_ISSUES marker returns True."""
-        # Create a minimal PiRunner instance
+        # Create a minimal AgyRunner instance
         settings = MagicMock()
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -1167,7 +1167,7 @@ class TestHasNoReviewIssues:
         settings = MagicMock()
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1182,7 +1182,7 @@ class TestHasNoReviewIssues:
         settings = MagicMock()
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1197,7 +1197,7 @@ class TestHasNoReviewIssues:
         settings = MagicMock()
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1213,7 +1213,7 @@ class TestHasNoReviewIssues:
         settings = MagicMock()
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1227,7 +1227,7 @@ class TestHasNoReviewIssues:
         settings = MagicMock()
         paths = MagicMock()
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1249,9 +1249,9 @@ class TestRunChecks:
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
         paths.checks_log = tmp_path / "checks.log"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1270,9 +1270,9 @@ class TestRunChecks:
         paths.template_context.return_value = _FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
         paths.checks_log = tmp_path / "checks.log"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1298,9 +1298,9 @@ class TestFetchPrThreads:
         paths.review_current_file = tmp_path / "review_current.md"
         paths.pr_threads_cache = tmp_path / "pr_threads_cache"
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1323,9 +1323,9 @@ class TestFetchPrThreads:
         paths.review_current_file = tmp_path / "review_current.md"
         paths.pr_threads_cache = tmp_path / "pr_threads_cache"
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1354,9 +1354,9 @@ class TestFetchPrThreads:
         paths.review_current_file = tmp_path / "review_current.md"
         paths.pr_threads_cache = tmp_path / "pr_threads_cache"
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1386,9 +1386,9 @@ class TestFetchPrThreads:
         paths.review_current_file = tmp_path / "review_current.md"
         paths.pr_threads_cache = tmp_path / "pr_threads_cache"
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1433,9 +1433,9 @@ class TestFetchPrThreads:
         paths.review_current_file = tmp_path / "review_current.md"
         paths.pr_threads_cache = tmp_path / "pr_threads_cache"
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1491,9 +1491,9 @@ class TestFetchPrThreads:
         paths.review_current_file = tmp_path / "review_current.md"
         paths.pr_threads_cache = tmp_path / "pr_threads_cache"
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -1533,9 +1533,9 @@ class TestCompleteSuccess:
         paths.review_current_file = tmp_path / "review_current.md"
         paths.start_sha_file = tmp_path / "start_sha"
         paths.project_root = tmp_path
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
@@ -1572,9 +1572,9 @@ class TestCompleteSuccess:
         paths.review_file = tmp_path / "review.md"
         paths.review_current_file = tmp_path / "review_current.md"
         paths.start_sha_file = tmp_path / "start_sha"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
@@ -1703,12 +1703,12 @@ class TestFileLock:
 
 
 class TestRunFullCodebaseReviewOnce:
-    """Tests for the single-pass full-codebase review entrypoint on PiRunner."""
+    """Tests for the single-pass full-codebase review entrypoint on AgyRunner."""
 
     def _build_runner(
         self,
         tmp_path: Path,
-    ) -> tuple[PiRunner, MagicMock, MagicMock]:
+    ) -> tuple[AgyRunner, MagicMock, MagicMock]:
         settings = MagicMock()
         settings.max_iters = 5
         settings.ntfy_enabled = False
@@ -1720,11 +1720,11 @@ class TestRunFullCodebaseReviewOnce:
         paths.review_file = tmp_path / "review.md"
         paths.review_current_file = tmp_path / "review_current.md"
         paths.start_sha_file = tmp_path / ".start_sha"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
         review_manager = MagicMock()
         logger = MagicMock()
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 0
@@ -1733,7 +1733,7 @@ class TestRunFullCodebaseReviewOnce:
         runner.session_log = tmp_path / "session.log"
         runner.artifact_manager = MagicMock()
         runner.review_manager = review_manager
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
         return runner, review_manager, logger
 
     def test_runs_exactly_one_pass_and_prints_findings(
@@ -1803,12 +1803,12 @@ class TestRunFullCodebaseReviewOnce:
 
 
 class TestRunContextualReviewOnce:
-    """Tests for the single-pass contextual review entrypoint on PiRunner."""
+    """Tests for the single-pass contextual review entrypoint on AgyRunner."""
 
     def _build_runner(
         self,
         tmp_path: Path,
-    ) -> tuple[PiRunner, MagicMock, MagicMock]:
+    ) -> tuple[AgyRunner, MagicMock, MagicMock]:
         settings = MagicMock()
         settings.max_iters = 5
         settings.ntfy_enabled = False
@@ -1820,11 +1820,11 @@ class TestRunContextualReviewOnce:
         paths.review_file = tmp_path / "review.md"
         paths.review_current_file = tmp_path / "review_current.md"
         paths.start_sha_file = tmp_path / ".start_sha"
-        paths.pi_log = tmp_path / "pi.log"
+        paths.agent_log = tmp_path / "agy.log"
 
         review_manager = MagicMock()
         logger = MagicMock()
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 0
@@ -1833,7 +1833,7 @@ class TestRunContextualReviewOnce:
         runner.session_log = tmp_path / "session.log"
         runner.artifact_manager = MagicMock()
         runner.review_manager = review_manager
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
         return runner, review_manager, logger
 
     def test_runs_exactly_one_pass_and_prints_findings(
@@ -1923,13 +1923,13 @@ class TestPrThreadsIntrospectOnly:
         introspection_manager = MagicMock()
         logger = MagicMock()
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = MagicMock()
         runner.paths = paths
         runner.iteration = 0
         runner.logger = logger
         runner.start_sha = "abc123"
-        runner.run_pi_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(return_value=(0, "", ""))  # type: ignore[method-assign]
 
         with (
             patch.object(runner, "_get_pr_manager", return_value=pr_manager),

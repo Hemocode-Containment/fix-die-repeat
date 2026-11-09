@@ -29,17 +29,72 @@ class Settings(BaseSettings):
         description="Maximum loop iterations",
     )
 
-    # Model configuration
+    # Antigravity CLI & Model configuration
+    agy_bin: str = pyd.Field(
+        default="agy",
+        alias="FDR_AGY_BIN",
+        description="Path or name of the Antigravity CLI executable",
+    )
+
     model: str | None = pyd.Field(
         default=None,
         alias="FDR_MODEL",
-        description="Override model selection",
+        description="Primary agy model ID prepended to all role chains",
     )
 
-    test_model: str | None = pyd.Field(
+    models_fix: str | None = pyd.Field(
         default=None,
-        alias="FDR_TEST_MODEL",
-        description="Test model compatibility before running",
+        alias="FDR_MODELS_FIX",
+        description="Comma-separated model fallback chain for fix turns",
+    )
+
+    models_review: str | None = pyd.Field(
+        default=None,
+        alias="FDR_MODELS_REVIEW",
+        description="Comma-separated model fallback chain for review turns",
+    )
+
+    models_introspect: str | None = pyd.Field(
+        default=None,
+        alias="FDR_MODELS_INTROSPECT",
+        description="Comma-separated model fallback chain for introspection turns",
+    )
+
+    models_improve: str | None = pyd.Field(
+        default=None,
+        alias="FDR_MODELS_IMPROVE",
+        description="Comma-separated model fallback chain for improve-prompts turns",
+    )
+
+    preflight: bool = pyd.Field(
+        default=False,
+        alias="FDR_PREFLIGHT",
+        description="Run agy version, model inventory, quota snapshot, and smoke test, then exit",
+    )
+
+    # Quota & Operational Safeguards
+    quota_source: str = pyd.Field(
+        default="auto",
+        alias="FDR_QUOTA_SOURCE",
+        description="Quota source for reset-window ordering: auto, codexbar, or none",
+    )
+
+    quota_max_used_pct: float = pyd.Field(
+        default=95.0,
+        alias="FDR_QUOTA_MAX_USED_PCT",
+        description="Max window usedPercent before a quota pool is skipped",
+    )
+
+    quota_max_wait_s: int = pyd.Field(
+        default=900,
+        alias="FDR_QUOTA_MAX_WAIT_S",
+        description="Max seconds to sleep waiting for a window reset when all models are exhausted",
+    )
+
+    daily_max_calls: int = pyd.Field(
+        default=50,
+        alias="FDR_DAILY_MAX_CALLS",
+        description="Maximum agy invocations per UTC day (0 for unlimited)",
     )
 
     # PR review configuration
@@ -97,11 +152,11 @@ class Settings(BaseSettings):
         description="Fetch unresolved PR threads and run introspection without attempting fixes",
     )
 
-    # Prompt-improvement mode (uses pi to update user-templates from introspection data)
+    # Prompt-improvement mode (uses agy to update user-templates from introspection data)
     improve_prompts: bool = pyd.Field(
         default=False,
         alias="FDR_IMPROVE_PROMPTS",
-        description="Run pi over accumulated introspection data to update user prompt templates",
+        description="Run agy over accumulated introspection data to update user prompt templates",
     )
 
     # Debug mode
@@ -153,26 +208,23 @@ class Settings(BaseSettings):
         description="Line count threshold for large file warnings",
     )
 
-    pi_sequential_delay_seconds: int = pyd.Field(
-        default=1,
-        description="Minimum delay between sequential pi invocations",
-    )
-
-    # Bridge prompt timeouts. The bridge surfaces every pi event (tool calls,
-    # text deltas) so the Python side can tell "working" apart from "hung"; the
-    # idle timeout fires only on true silence, and the hard cap bounds runaway
-    # event storms. Override either via FDR_PI_IDLE_TIMEOUT_S /
-    # FDR_PI_HARD_TIMEOUT_S for hostile networks or extreme-scale reviews.
-    pi_prompt_idle_timeout_s: float = pyd.Field(
+    # Agent turn timeouts
+    agent_idle_timeout_s: float = pyd.Field(
         default=120.0,
-        alias="FDR_PI_IDLE_TIMEOUT_S",
-        description="Fail a pi prompt if no bridge event arrives for this long",
+        alias="FDR_AGENT_IDLE_TIMEOUT_S",
+        description="Max seconds without an agy event while no tool step is active",
     )
 
-    pi_prompt_hard_timeout_s: float = pyd.Field(
+    agent_tool_timeout_s: float = pyd.Field(
+        default=1200.0,
+        alias="FDR_AGENT_TOOL_TIMEOUT_S",
+        description="Max seconds an active agy tool step may run",
+    )
+
+    agent_hard_timeout_s: float = pyd.Field(
         default=3600.0,
-        alias="FDR_PI_HARD_TIMEOUT_S",
-        description="Absolute wall-clock cap on a single pi prompt (safety net)",
+        alias="FDR_AGENT_HARD_TIMEOUT_S",
+        description="Absolute wall-clock cap on a single agy turn",
     )
 
     model_config = SettingsConfigDict(
@@ -212,7 +264,7 @@ class CliOptions:
     contextual_review: bool = False
     pr_threads_introspect_only: bool = False
     improve_prompts: bool = False
-    test_model: str | None = None
+    preflight: bool = False
     debug: bool = False
 
 
@@ -226,14 +278,11 @@ def get_settings(options: CliOptions | None = None) -> Settings:
         Settings instance
 
     """
-    # Get base settings from environment
     settings = Settings()
 
-    # Apply CLI overrides if provided
     if options is not None:
         _apply_cli_options(settings, options)
 
-    # Validate settings
     settings.validate_max_iters()
 
     return settings
@@ -249,10 +298,7 @@ def _apply_cli_options(settings: Settings, options: CliOptions) -> None:
         options: CLI options to apply
 
     """
-    # Apply command options
     _apply_command_options(settings, options)
-
-    # Apply boolean flags
     _apply_boolean_flags(settings, options)
 
 
@@ -272,8 +318,17 @@ def _apply_command_options(settings: Settings, options: CliOptions) -> None:
         settings.model = options.model
     if options.max_pr_threads is not None:
         settings.max_pr_threads = options.max_pr_threads
-    if options.test_model is not None:
-        settings.test_model = options.test_model
+
+
+_BOOLEAN_FLAG_NAMES: tuple[str, ...] = (
+    "pr_review",
+    "full_codebase_review",
+    "contextual_review",
+    "pr_threads_introspect_only",
+    "improve_prompts",
+    "preflight",
+    "debug",
+)
 
 
 def _apply_boolean_flags(settings: Settings, options: CliOptions) -> None:
@@ -288,21 +343,12 @@ def _apply_boolean_flags(settings: Settings, options: CliOptions) -> None:
         settings.archive_artifacts = options.archive_artifacts
     if options.no_compact:
         settings.compact_artifacts = False
-    if options.pr_review:
-        settings.pr_review = options.pr_review
+    for flag_name in _BOOLEAN_FLAG_NAMES:
+        if getattr(options, flag_name):
+            setattr(settings, flag_name, True)
     if options.pr_review_introspect:
-        settings.pr_review_introspect = options.pr_review_introspect
+        settings.pr_review_introspect = True
         settings.pr_review = True
-    if options.full_codebase_review:
-        settings.full_codebase_review = options.full_codebase_review
-    if options.contextual_review:
-        settings.contextual_review = options.contextual_review
-    if options.pr_threads_introspect_only:
-        settings.pr_threads_introspect_only = options.pr_threads_introspect_only
-    if options.improve_prompts:
-        settings.improve_prompts = options.improve_prompts
-    if options.debug:
-        settings.debug = options.debug
 
 
 def _central_root() -> Path:
@@ -348,7 +394,11 @@ class Paths:
 
         """
         self.project_root = project_root or self._find_project_root()
-        self.fdr_dir = _central_root() / "repos" / _repo_slug(self.project_root)
+        self.fdr_home = _central_root()
+        self.fdr_dir = self.fdr_home / "repos" / _repo_slug(self.project_root)
+        self.agy_state_file = self.fdr_home / "agy_state.json"
+        self.quota_state_file = self.fdr_home / "quota_state.json"
+        self.runner_lock_file = self.fdr_dir / "runner.lock"
         self.config_file = self.fdr_dir / "config"
         self.review_file = self.fdr_dir / "review.md"
         self.review_current_file = self.fdr_dir / "review_current.md"
@@ -357,7 +407,8 @@ class Paths:
         self.checks_log = self.fdr_dir / "checks.log"
         self.checks_filtered_log = self.fdr_dir / "checks_filtered.log"
         self.checks_hash_file = self.fdr_dir / ".checks_hashes"
-        self.pi_log = self.fdr_dir / "pi.log"
+        self.agy_log = self.fdr_dir / "agy.log"
+        self.agy_transcripts_dir = self.fdr_dir / "agy"
         self.fdr_log = self.fdr_dir / "fdr.log"
         self.pr_threads_cache = self.fdr_dir / ".pr_threads_cache"
         self.pr_threads_hash_file = self.fdr_dir / ".pr_threads_hash"
@@ -373,30 +424,6 @@ class Paths:
         self.introspection_data_file = self.fdr_dir / ".introspection_data.yaml"
         self.introspection_result_file = self.fdr_dir / ".introspection_result.yaml"
 
-        # Pi-bridge has two related paths:
-        #
-        # * ``bridge_source_dir`` — where the shipped files (bridge.js,
-        #   package.json, package-lock.json) live. Defaults to the wheel's
-        #   ``priv/pi-bridge/`` directory; ``FDR_BRIDGE_DIR`` overrides both
-        #   source and runtime for dev checkouts.
-        # * ``bridge_runtime_dir`` — where ``node_modules/`` gets installed and
-        #   where Node actually launches the bridge. Must be writable. Defaults
-        #   to a per-FDR-install cache under ``_central_root() / "bridge"`` so
-        #   installs don't try to write into a potentially read-only
-        #   site-packages directory when fdr is installed as a wheel.
-        #
-        # The cache is shared across all repos because the bridge deps are
-        # repo-independent — installing once per FDR-install saves disk and
-        # cold-cache ``npm ci`` time.
-        override = os.environ.get("FDR_BRIDGE_DIR")
-        if override:
-            override_path = Path(override).expanduser().resolve()
-            self.bridge_source_dir = override_path
-            self.bridge_runtime_dir = override_path
-        else:
-            self.bridge_source_dir = (Path(__file__).parent.parent / "priv" / "pi-bridge").resolve()
-            self.bridge_runtime_dir = (_central_root() / "bridge").resolve(strict=False)
-
     @staticmethod
     def _find_project_root() -> Path:
         """Find project root directory.
@@ -405,7 +432,6 @@ class Paths:
             Path to project root
 
         """
-        # Try to get git root first
         git_path = shutil.which("git")
         if git_path:
             returncode, stdout, _ = run_command(
@@ -415,7 +441,6 @@ class Paths:
             if returncode == 0 and stdout.strip():
                 return Path(stdout.strip())
 
-        # Fall back to current directory
         return Path.cwd()
 
     def ensure_fdr_dir(self) -> None:
@@ -457,21 +482,10 @@ def get_introspection_file_path(*, create: bool = True) -> Path:
 
 
 def get_introspection_archive_file_path() -> Path:
-    """Return the introspection archive path (``<FDR_HOME>/introspection-archive.yaml``).
-
-    Unlike ``get_introspection_file_path``, this function does not create
-    the parent directory — the archive is only materialized by the
-    prompt-improvement compaction step when it actually writes content.
-    """
+    """Return the introspection archive path (``<FDR_HOME>/introspection-archive.yaml``)."""
     return _central_root() / "introspection-archive.yaml"
 
 
 def get_user_templates_dir() -> Path:
-    """Return the user-editable templates directory (``<FDR_HOME>/templates/``).
-
-    Templates written here override the ones shipped in the package. The
-    directory is created lazily so unused installs don't clutter the
-    dotfolder, but callers that intend to write a template should call
-    ``.mkdir(parents=True, exist_ok=True)`` on the returned path first.
-    """
+    """Return the user-editable templates directory (``<FDR_HOME>/templates/``)."""
     return _central_root() / "templates"

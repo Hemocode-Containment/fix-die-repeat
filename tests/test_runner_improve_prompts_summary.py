@@ -23,13 +23,13 @@ if TYPE_CHECKING:
 
 
 class _PiSpy:
-    """Captures pi invocations so tests can assert on arguments."""
+    """Captures agent invocations so tests can assert on arguments."""
 
     def __init__(self, returncode: int = 0) -> None:
         self.returncode = returncode
-        self.calls: list[tuple[str, ...]] = []
+        self.calls: list[tuple[object, ...]] = []
 
-    def __call__(self, *args: str) -> tuple[int, str, str]:
+    def __call__(self, *args: object, **_kwargs: object) -> tuple[int, str, str]:
         self.calls.append(args)
         return (self.returncode, "", "")
 
@@ -66,7 +66,7 @@ class TestSummary:
         _write_introspection(_PENDING_ENTRY)
         templates_dir = get_user_templates_dir()
 
-        def editing_pi(*_args: str) -> tuple[int, str, str]:
+        def editing_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             (templates_dir / "local_review.j2").write_text("edited by pi\n")
             (templates_dir / "partials/_critical_checklist.j2").write_text("edited partial\n")
             return (0, "", "")
@@ -124,7 +124,7 @@ class TestSummary:
             "pr_url: https://example.com/pr/2\nproject: demo\nthreads: []\n",
         )
 
-        def consuming_pi(*_args: str) -> tuple[int, str, str]:
+        def consuming_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             path.write_text(
                 "date: '2026-04-01'\nstatus: reviewed\npr_number: 1\n"
                 "pr_url: https://example.com/pr/1\nproject: demo\nthreads: []\n"
@@ -153,7 +153,7 @@ class TestSummary:
         _write_introspection(_PENDING_ENTRY)
         templates_dir = get_user_templates_dir()
 
-        def extending_pi(*_args: str) -> tuple[int, str, str]:
+        def extending_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             target = templates_dir / "fix_checks.j2"
             base = target.read_text()
             if not base.endswith("\n"):
@@ -188,7 +188,7 @@ class TestSummary:
         _write_introspection(_PENDING_ENTRY)
         templates_dir = get_user_templates_dir()
 
-        def rewriting_pi(*_args: str) -> tuple[int, str, str]:
+        def rewriting_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             target = templates_dir / "partials/_critical_checklist.j2"
             original = target.read_text().splitlines()
             rewritten = [f"ZZZ rewritten line {i}" for i in range(len(original))]
@@ -231,7 +231,7 @@ class TestSummary:
         _write_introspection(_PENDING_ENTRY)
         templates_dir = get_user_templates_dir()
 
-        def strip_trailing_newline_pi(*_args: str) -> tuple[int, str, str]:
+        def strip_trailing_newline_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             target = templates_dir / "fix_checks.j2"
             base = target.read_text()
             if base.endswith("\n"):
@@ -264,7 +264,7 @@ class TestSummary:
         _write_introspection(_PENDING_ENTRY)
         templates_dir = get_user_templates_dir()
 
-        def rationale_pi(*_args: str) -> tuple[int, str, str]:
+        def rationale_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             (templates_dir / "fix_checks.j2").write_text("edited by pi\n")
             stdout = (
                 "preamble noise that must not be echoed\n"
@@ -283,7 +283,7 @@ class TestSummary:
             rc = manager.run_improve_prompts(rationale_pi)
 
         assert rc == 0
-        pi_prefixed = [r.message for r in caplog.records if "pi:" in r.message]
+        pi_prefixed = [r.message for r in caplog.records if "agy:" in r.message]
         joined = "\n".join(pi_prefixed)
         assert "added retry guidance" in joined
         assert "Entries reviewed: 1" in joined
@@ -301,7 +301,7 @@ class TestSummary:
         _write_introspection(_PENDING_ENTRY)
         templates_dir = get_user_templates_dir()
 
-        def noncompliant_pi(*_args: str) -> tuple[int, str, str]:
+        def noncompliant_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             (templates_dir / "fix_checks.j2").write_text("edited by pi\n")
             return (0, "pi produced output but forgot the markers entirely", "")
 
@@ -316,7 +316,7 @@ class TestSummary:
             if r.levelno >= logging.WARNING and "summary" in r.message.lower()
         ]
         assert len(warnings) == 1, "expected exactly one warning about the missing summary markers"
-        pi_prefixed = [r.message for r in caplog.records if "pi:" in r.message]
+        pi_prefixed = [r.message for r in caplog.records if "agy:" in r.message]
         assert not pi_prefixed, "no rationale should be echoed when markers are missing"
 
     def test_summary_counts_added_lines_whose_content_starts_with_plus_plus_plus(
@@ -334,7 +334,7 @@ class TestSummary:
         _write_introspection(_PENDING_ENTRY)
         templates_dir = get_user_templates_dir()
 
-        def plus_prefix_pi(*_args: str) -> tuple[int, str, str]:
+        def plus_prefix_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             target = templates_dir / "fix_checks.j2"
             target.write_text("+++marker line one\n+++marker line two\n")
             return (0, "", "")
@@ -369,7 +369,7 @@ class TestSummary:
         _write_introspection(_PENDING_ENTRY)
         templates_dir = get_user_templates_dir()
 
-        def silent_pi(*_args: str) -> tuple[int, str, str]:
+        def silent_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             (templates_dir / "fix_checks.j2").write_text("edited by pi\n")
             return (0, "   \n\t\n", "")
 
@@ -386,5 +386,5 @@ class TestSummary:
         assert not marker_warnings, (
             "empty/whitespace-only pi stdout should not emit a marker-contract warning"
         )
-        pi_prefixed = [r.message for r in caplog.records if "pi:" in r.message]
+        pi_prefixed = [r.message for r in caplog.records if "agy:" in r.message]
         assert not pi_prefixed, "no rationale lines should be echoed when stdout is empty"

@@ -121,7 +121,7 @@ class TestRenderPrompt:
         assert "YAML document" in prompt
         assert "GraphQL thread ID" in prompt
         assert "security, error-handling, performance" in prompt
-        assert "Use the 'write' tool" in prompt
+        assert "JSON schema" in prompt
 
 
 class TestLanguageSpecificRendering:
@@ -473,7 +473,7 @@ class TestReviewPartials:
         """_review_readonly_task emits the identify-don't-fix framing."""
         prompt = render_prompt("partials/_review_readonly_task.j2")
         assert "identify and document issues" in prompt
-        assert "'edit' or 'bash'" in prompt
+        assert "'edit_file', 'write_file', or 'run_command'" in prompt
 
     def test_issue_classification_renders(self) -> None:
         """_issue_classification defines CRITICAL vs NIT."""
