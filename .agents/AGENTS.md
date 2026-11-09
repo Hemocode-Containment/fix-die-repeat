@@ -32,6 +32,10 @@ Do not post PR comments or otherwise request another CodeRabbit review. The user
 
 Agents MUST NOT use `--no-verify` or `-n` on `git commit`, and MUST NOT reach for a different shell, an eval cell, or any other execution path to get a bypassed commit past the guard. When a commit hook fails, fix the failing check and commit normally instead of bypassing it. Normal `git commit` remains the only commit interface: no wrapper command and no commit-message trailer.
 
+### Skill Self-Learning and Improvement
+
+All skills in `.agents/skills/` are self-learning and self-improvement opportunities. When observing recurring execution patterns, common tool failures, unhandled edge cases, or clearer procedural steps during task execution, update the relevant skill files directly. Maintain frontmatter schema integrity (`name`, `description`), preserve existing capabilities, and verify changes against tests or validation scripts before committing.
+
 ## Quick Commands
 
 - Run full CI in check-only mode: `./scripts/ci.sh --check-only`
