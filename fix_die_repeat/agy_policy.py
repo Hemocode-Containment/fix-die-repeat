@@ -7,6 +7,8 @@ version-change preflight patterns with reset-window-aware model ordering via
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -21,7 +23,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import logging
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
 _SUBPROCESS_TIMEOUT_S = 15.0
 _CODEXBAR_TIMEOUT_S = 5.0
@@ -360,9 +362,26 @@ def fetch_codexbar_snapshot(
 class QuotaStateStore:
     """Persistent store for per-model quota cooldowns and UTC daily call counts."""
 
-    def __init__(self, state_path: Path) -> None:
+    def __init__(self, state_path: Path, *, default_cooldown_s: float | None = None) -> None:
         """Initialize the quota state store backed by ``state_path``."""
         self._path = state_path
+        self._default_cooldown_s = default_cooldown_s
+
+    @property
+    def path(self) -> Path:
+        """Path to the underlying JSON state file."""
+        return self._path
+
+    @contextlib.contextmanager
+    def _lock(self) -> Iterator[None]:
+        lock_file = self._path.with_suffix(".lock")
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        with lock_file.open("a+") as fd:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
 
     @staticmethod
     def _utc_day(now: float | None = None) -> str:
@@ -386,28 +405,39 @@ class QuotaStateStore:
 
     def daily_calls_used(self, now: float | None = None) -> int:
         """Return the number of ``agy`` invocations recorded for the current UTC day."""
-        data = self._load()
-        daily = data.get("daily_runs")
-        if not isinstance(daily, dict) or daily.get("date") != self._utc_day(now):
-            return 0
-        count = daily.get("count", 0)
-        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
-            return 0
-        return count
+        with self._lock():
+            data = self._load()
+            daily = data.get("daily_runs")
+            if not isinstance(daily, dict) or daily.get("date") != self._utc_day(now):
+                return 0
+            count = daily.get("count", 0)
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+                return 0
+            return count
 
     def increment_daily_calls(self, model: str, now: float | None = None) -> int:
         """Increment and return today's ``agy`` invocation count."""
-        data = self._load()
-        today = self._utc_day(now)
-        current = self.daily_calls_used(now)
-        updated_count = current + 1
-        data["daily_runs"] = {
-            "date": today,
-            "count": updated_count,
-            "last_model": model,
-        }
-        self._save(data)
-        return updated_count
+        with self._lock():
+            data = self._load()
+            today = self._utc_day(now)
+            daily = data.get("daily_runs")
+            current = 0
+            if isinstance(daily, dict) and daily.get("date") == today:
+                raw_count = daily.get("count", 0)
+                if (
+                    isinstance(raw_count, int)
+                    and not isinstance(raw_count, bool)
+                    and raw_count >= 0
+                ):
+                    current = raw_count
+            updated_count = current + 1
+            data["daily_runs"] = {
+                "date": today,
+                "count": updated_count,
+                "last_model": model,
+            }
+            self._save(data)
+            return updated_count
 
     def check_daily_cap(self, max_calls: int, now: float | None = None) -> None:
         """Raise :class:`AgyPolicyError` if ``max_calls > 0`` and today's cap is reached."""
@@ -424,17 +454,18 @@ class QuotaStateStore:
     def cooldown_until(self, model: str, now: float | None = None) -> float:
         """Return the epoch timestamp until which ``model`` is cooling down, or ``0.0``."""
         now_val = time.time() if now is None else now
-        data = self._load()
-        cooldowns = data.get("cooldowns")
-        if not isinstance(cooldowns, dict):
-            return 0.0
-        entry = cooldowns.get(model)
-        if not isinstance(entry, dict):
-            return 0.0
-        retry_at = entry.get("retry_at", 0.0)
-        if not isinstance(retry_at, (int, float)) or retry_at <= now_val:
-            return 0.0
-        return float(retry_at)
+        with self._lock():
+            data = self._load()
+            cooldowns = data.get("cooldowns")
+            if not isinstance(cooldowns, dict):
+                return 0.0
+            entry = cooldowns.get(model)
+            if not isinstance(entry, dict):
+                return 0.0
+            retry_at = entry.get("retry_at", 0.0)
+            if not isinstance(retry_at, (int, float)) or retry_at <= now_val:
+                return 0.0
+            return float(retry_at)
 
     def record_quota_cooldown(
         self,
@@ -446,39 +477,44 @@ class QuotaStateStore:
     ) -> float:
         """Record a quota cooldown for ``model`` and return the ``retry_at`` epoch."""
         now_val = time.time() if now is None else now
-        data = self._load()
-        cooldowns = data.get("cooldowns")
-        if not isinstance(cooldowns, dict):
-            cooldowns = {}
-        prev = cooldowns.get(model)
-        attempts = 0
-        if isinstance(prev, dict):
-            raw_attempts = prev.get("attempts", 0)
-            if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool):
-                attempts = max(0, raw_attempts)
-        step_index = min(attempts, len(_COOLDOWN_STEPS_S) - 1)
-        delay_s = float(_COOLDOWN_STEPS_S[step_index])
-        retry_at = now_val + delay_s
-        if provider_reset_epoch is not None and provider_reset_epoch > now_val:
-            retry_at = min(provider_reset_epoch, now_val + _MAX_PROVIDER_RESET_CAP_S)
-        cooldowns[model] = {
-            "attempts": attempts + 1,
-            "retry_at": retry_at,
-            "reason": reason[:200],
-            "updated_at": now_val,
-        }
-        data["cooldowns"] = cooldowns
-        self._save(data)
-        return retry_at
+        with self._lock():
+            data = self._load()
+            cooldowns = data.get("cooldowns")
+            if not isinstance(cooldowns, dict):
+                cooldowns = {}
+            prev = cooldowns.get(model)
+            attempts = 0
+            if isinstance(prev, dict):
+                raw_attempts = prev.get("attempts", 0)
+                if isinstance(raw_attempts, int) and not isinstance(raw_attempts, bool):
+                    attempts = max(0, raw_attempts)
+            if self._default_cooldown_s is not None and self._default_cooldown_s > 0:
+                delay_s = self._default_cooldown_s
+            else:
+                step_index = min(attempts, len(_COOLDOWN_STEPS_S) - 1)
+                delay_s = float(_COOLDOWN_STEPS_S[step_index])
+            retry_at = now_val + delay_s
+            if provider_reset_epoch is not None and provider_reset_epoch > now_val:
+                retry_at = min(provider_reset_epoch, now_val + _MAX_PROVIDER_RESET_CAP_S)
+            cooldowns[model] = {
+                "attempts": attempts + 1,
+                "retry_at": retry_at,
+                "reason": reason[:200],
+                "updated_at": now_val,
+            }
+            data["cooldowns"] = cooldowns
+            self._save(data)
+            return retry_at
 
     def clear_cooldown(self, model: str) -> None:
         """Clear any recorded cooldown for ``model`` after a successful turn."""
-        data = self._load()
-        cooldowns = data.get("cooldowns")
-        if isinstance(cooldowns, dict) and model in cooldowns:
-            del cooldowns[model]
-            data["cooldowns"] = cooldowns
-            self._save(data)
+        with self._lock():
+            data = self._load()
+            cooldowns = data.get("cooldowns")
+            if isinstance(cooldowns, dict) and model in cooldowns:
+                del cooldowns[model]
+                data["cooldowns"] = cooldowns
+                self._save(data)
 
 
 @dataclass(frozen=True)
@@ -628,6 +664,7 @@ def build_permission_settings(
             "permissions": {
                 "deny": [
                     "write_file(/)",
+                    "edit_file(/)",
                     "command(*)",
                     "mcp(*)",
                 ],
@@ -647,11 +684,14 @@ def build_permission_settings(
                     "command(*)",
                     "mcp(*)",
                     f"write_file({proj}/)",
+                    f"edit_file({proj}/)",
                     f"write_file({introspection_file})",
+                    f"edit_file({introspection_file})",
                 ],
                 "allow": [
                     f"read_file({fdr_home})",
                     f"write_file({templates_dir}/)",
+                    f"edit_file({templates_dir}/)",
                 ],
             },
         }
@@ -661,8 +701,11 @@ def build_permission_settings(
         "permissions": {
             "deny": [
                 f"write_file({proj}/.git/)",
+                f"edit_file({proj}/.git/)",
                 f"write_file({proj}/.agents/)",
+                f"edit_file({proj}/.agents/)",
                 f"write_file({fdr_dir}/)",
+                f"edit_file({fdr_dir}/)",
                 "command(git commit)",
                 "command(git push)",
                 "command(git reset)",
@@ -675,6 +718,7 @@ def build_permission_settings(
             "allow": [
                 f"read_file({proj})",
                 f"write_file({proj})",
+                f"edit_file({proj})",
                 f"read_file({fdr_dir})",
             ],
         },

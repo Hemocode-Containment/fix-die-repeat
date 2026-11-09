@@ -116,6 +116,8 @@ class GitSnapshot:
     head_sha: str = ""
     status_porcelain: str = ""
     diff_sha256: str = ""
+    staged_tree_sha: str = ""
+    stash_sha: str = ""
 
 
 def capture_git_snapshot(project_root: Path) -> GitSnapshot:
@@ -143,11 +145,23 @@ def capture_git_snapshot(project_root: Path) -> GitSnapshot:
     diff_text = diff_out if rc_diff == 0 else ""
     diff_sha256 = hashlib.sha256(diff_text.encode("utf-8", errors="replace")).hexdigest()
 
+    rc_tree, tree_out, _ = run_command([git_bin, "write-tree"], cwd=project_root, check=False)
+    staged_tree_sha = tree_out.strip() if rc_tree == 0 else ""
+
+    rc_stash, stash_out, _ = run_command(
+        [git_bin, "stash", "create"],
+        cwd=project_root,
+        check=False,
+    )
+    stash_sha = stash_out.strip() if rc_stash == 0 else ""
+
     return GitSnapshot(
         is_git_repo=True,
         head_sha=head_sha,
         status_porcelain=status_porcelain,
         diff_sha256=diff_sha256,
+        staged_tree_sha=staged_tree_sha,
+        stash_sha=stash_sha,
     )
 
 
@@ -162,18 +176,27 @@ def verify_readonly_git_state(
     after = capture_git_snapshot(project_root)
     git_bin = shutil.which("git") or "git"
 
-    if before.head_sha and after.head_sha and after.head_sha != before.head_sha:
-        logger.error(
-            "Read-only agy turn advanced HEAD (%s -> %s); resetting to %s",
-            before.head_sha[:8],
-            after.head_sha[:8],
-            before.head_sha[:8],
-        )
-        run_command([git_bin, "reset", "--soft", before.head_sha], cwd=project_root, check=False)
-        return False
+    mutated = (
+        bool(before.head_sha and after.head_sha and after.head_sha != before.head_sha)
+        or after.status_porcelain != before.status_porcelain
+        or after.diff_sha256 != before.diff_sha256
+    )
 
-    if after.status_porcelain != before.status_porcelain or after.diff_sha256 != before.diff_sha256:
-        logger.error("Read-only agy turn mutated the git working tree or index; rejecting turn.")
+    if mutated:
+        logger.error("Read-only agy turn mutated HEAD, working tree, or index; restoring snapshot.")
+        if before.head_sha:
+            run_command(
+                [git_bin, "reset", "--hard", before.head_sha],
+                cwd=project_root,
+                check=False,
+            )
+        run_command([git_bin, "clean", "-fd"], cwd=project_root, check=False)
+        if before.stash_sha:
+            run_command(
+                [git_bin, "stash", "apply", "--index", before.stash_sha],
+                cwd=project_root,
+                check=False,
+            )
         return False
 
     return True
@@ -192,12 +215,18 @@ def verify_fix_git_state(
 
     if before.head_sha and after.head_sha and after.head_sha != before.head_sha:
         logger.warning(
-            "Fix turn created a commit (%s -> %s); soft-resetting to %s so diff stays in worktree",
+            "Fix turn created a commit (%s -> %s); mixed-resetting to %s to restore index",
             before.head_sha[:8],
             after.head_sha[:8],
             before.head_sha[:8],
         )
-        run_command([git_bin, "reset", "--soft", before.head_sha], cwd=project_root, check=False)
+        run_command([git_bin, "reset", "--mixed", before.head_sha], cwd=project_root, check=False)
+        if before.staged_tree_sha:
+            run_command(
+                [git_bin, "read-tree", before.staged_tree_sha],
+                cwd=project_root,
+                check=False,
+            )
 
     rc_agents, agents_status, _ = run_command(
         [git_bin, "status", "--porcelain", "--", ".agents"],
@@ -207,6 +236,7 @@ def verify_fix_git_state(
     if rc_agents == 0 and agents_status.strip():
         logger.error("Fix turn modified protected .agents/ customizations; reverting .agents/.")
         run_command([git_bin, "checkout", "--", ".agents"], cwd=project_root, check=False)
+        run_command([git_bin, "clean", "-fd", "--", ".agents"], cwd=project_root, check=False)
         return False
 
     return True

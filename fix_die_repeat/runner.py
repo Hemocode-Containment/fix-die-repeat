@@ -206,7 +206,12 @@ class AgyRunner:
         lock = RunnerLock(self.paths.runner_lock_file, logger=self.logger)
         lock.__enter__()
         self._runner_lock = lock
-        self._quota_store = QuotaStateStore(self.paths.quota_state_file)
+        cd_min = self.settings.quota_cooldown_minutes
+        default_cooldown_s = float(cd_min) * 60.0 if cd_min is not None else None
+        self._quota_store = QuotaStateStore(
+            self.paths.quota_state_file,
+            default_cooldown_s=default_cooldown_s,
+        )
         self._client = AgyClient(
             executable=self.settings.agy_bin,
             logger=self.logger,
@@ -236,7 +241,9 @@ class AgyRunner:
         quota_file = getattr(self.paths, "quota_state_file", None)
         if not isinstance(quota_file, Path):
             quota_file = self.paths.fdr_dir / "quota_state.json"
-        store = QuotaStateStore(quota_file)
+        cd_min = getattr(self.settings, "quota_cooldown_minutes", None)
+        default_cooldown_s = float(cd_min) * 60.0 if isinstance(cd_min, (int, float)) else None
+        store = QuotaStateStore(quota_file, default_cooldown_s=default_cooldown_s)
         self._quota_store = store
         return store
 
@@ -424,6 +431,7 @@ class AgyRunner:
             result = replace(
                 result,
                 returncode=1,
+                structured_output=None,
                 stderr="Post-run git invariant verification failed.",
             )
 
@@ -492,10 +500,22 @@ class AgyRunner:
                         "\n".join(clean_ids) + "\n",
                         encoding="utf-8",
                     )
+                else:
+                    self.paths.pr_resolved_threads_file.unlink(missing_ok=True)
             return result
 
         if role == AgentRole.IMPROVE_PROMPTS:
-            self._mark_introspection_entries_reviewed()
+            raw_reviewed_ids = structured.get("reviewed_thread_ids")
+            reviewed_ids = (
+                {
+                    str(tid).strip()
+                    for tid in raw_reviewed_ids
+                    if isinstance(tid, str) and str(tid).strip()
+                }
+                if isinstance(raw_reviewed_ids, list)
+                else set()
+            )
+            self._mark_introspection_entries_reviewed(reviewed_ids)
             summary = str(structured.get("summary") or "").strip()
             if summary and "<IMPROVE_PROMPTS_SUMMARY>" not in result.response_text:
                 wrapped = f"<IMPROVE_PROMPTS_SUMMARY>\n{summary}\n</IMPROVE_PROMPTS_SUMMARY>\n"
@@ -504,8 +524,10 @@ class AgyRunner:
         return result
 
     @staticmethod
-    def _mark_introspection_entries_reviewed() -> None:
+    def _mark_introspection_entries_reviewed(reviewed_ids: set[str]) -> None:
         """Transition ``status: pending`` entries in ``introspection.yaml`` to ``reviewed``."""
+        if not reviewed_ids:
+            return
         introspection_file = _get_introspection_file_path(create=False)
         if not introspection_file.exists():
             return
@@ -520,8 +542,19 @@ class AgyRunner:
             if isinstance(doc, dict):
                 entry = doc
                 if entry.get("status") == "pending":
-                    entry = {**entry, "status": "reviewed"}
-                    changed = True
+                    threads = entry.get("threads")
+                    doc_thread_ids = (
+                        {
+                            str(t.get("id")).strip()
+                            for t in threads
+                            if isinstance(t, dict) and t.get("id")
+                        }
+                        if isinstance(threads, list)
+                        else set()
+                    )
+                    if doc_thread_ids and doc_thread_ids.issubset(reviewed_ids):
+                        entry = {**entry, "status": "reviewed"}
+                        changed = True
                 updated_docs.append(entry)
         if changed:
             rendered = "\n---\n".join(
@@ -574,7 +607,16 @@ class AgyRunner:
                 models_to_try = selection.eligible_models
 
         if not models_to_try:
-            models_to_try = self._role_chain(role_enum)
+            reasons_summary = (
+                ", ".join(f"{m}: {r}" for m, r in selection.skipped_reasons.items())
+                or "no eligible models configured"
+            )
+            msg = (
+                f"All models for role '{role_enum.value}' are currently cooling down "
+                f"or exhausted ({reasons_summary})."
+            )
+            self.logger.warning(msg)
+            return (1, "", msg)
 
         quota_store = self._get_quota_store()
         last_tuple: tuple[int, str, str] = (1, "", "No models configured")

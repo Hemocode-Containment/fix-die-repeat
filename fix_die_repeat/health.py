@@ -8,6 +8,7 @@ process groups left behind if a previous run was killed abruptly.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import signal
@@ -27,6 +28,7 @@ _STAT_START_INDEX = 19
 _SUBPROCESS_TIMEOUT_S = 5.0
 _DEFAULT_REAP_GRACE_S = 2.0
 _REAP_POLL_INTERVAL_S = 0.05
+_LOCK_FILE_MODE = 0o600
 
 _BOOT_ID_CACHE: list[str] = []
 
@@ -219,9 +221,11 @@ class RunnerLock:
     def __init__(self, lock_path: Path, logger: logging.Logger | None = None) -> None:
         """Initialize the lock manager for ``lock_path``."""
         self._lock_path = lock_path
+        self._flock_path = lock_path.with_name(f"{lock_path.name}.lck")
         self._logger = logger
         self._runner_identity: ProcessIdentity | None = None
         self._worker_identity: ProcessIdentity | None = None
+        self._lock_fd: int | None = None
         self._acquired = False
 
     def __enter__(self) -> Self:
@@ -240,36 +244,67 @@ class RunnerLock:
 
     def acquire(self) -> None:
         """Acquire the lock or raise :class:`RunnerLockError` if held by a live process."""
-        existing = self._read_existing_lock()
-        if existing is not None:
-            self._handle_existing_lock(existing)
-        current = process_identity(os.getpid())
-        if current is None:
-            current = ProcessIdentity(
-                pid=os.getpid(),
-                ppid=os.getppid(),
-                start=str(int(time.time())),
-                boot=_darwin_boot_id(),
+        self._flock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(self._flock_path, os.O_CREAT | os.O_RDWR, _LOCK_FILE_MODE)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            os.close(fd)
+            existing = self._read_existing_lock()
+            saved_runner = ProcessIdentity.from_dict(existing.get("runner")) if existing else None
+            pid_str = f"PID {saved_runner.pid}" if saved_runner else "another process"
+            msg = (
+                f"Another fix-die-repeat process ({pid_str}) is already "
+                f"running for this repository (lock: {self._lock_path})."
             )
-        self._runner_identity = current
-        self._worker_identity = None
-        self._write_lock()
-        self._acquired = True
+            raise RunnerLockError(msg) from exc
+
+        self._lock_fd = fd
+        try:
+            existing = self._read_existing_lock()
+            if existing is not None:
+                self._handle_existing_lock(existing)
+            current = process_identity(os.getpid())
+            if current is None:
+                current = ProcessIdentity(
+                    pid=os.getpid(),
+                    ppid=os.getppid(),
+                    start=str(int(time.time())),
+                    boot=_darwin_boot_id(),
+                )
+            self._runner_identity = current
+            self._worker_identity = None
+            self._write_lock()
+            self._acquired = True
+        except Exception:
+            if self._lock_fd is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                    os.close(self._lock_fd)
+                self._lock_fd = None
+            raise
 
     def release(self) -> None:
         """Reap any in-flight worker and remove the lock file if owned by this process."""
         if not self._acquired:
             return
-        if self._worker_identity is not None:
-            live_worker = process_identity(self._worker_identity.pid)
-            if same_process(live_worker, self._worker_identity):
-                reap_process_group(self._worker_identity.pid, logger=self._logger)
-            self._worker_identity = None
-        with contextlib.suppress(OSError):
-            existing = self._read_existing_lock()
-            if existing is None or self._is_owned_by_self(existing):
-                self._lock_path.unlink(missing_ok=True)
-        self._acquired = False
+        try:
+            if self._worker_identity is not None:
+                live_worker = process_identity(self._worker_identity.pid)
+                if same_process(live_worker, self._worker_identity):
+                    reap_process_group(self._worker_identity.pid, logger=self._logger)
+                self._worker_identity = None
+            with contextlib.suppress(OSError):
+                existing = self._read_existing_lock()
+                if existing is None or self._is_owned_by_self(existing):
+                    self._lock_path.unlink(missing_ok=True)
+        finally:
+            if self._lock_fd is not None:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+                    os.close(self._lock_fd)
+                self._lock_fd = None
+            self._acquired = False
 
     def set_active_worker(self, pid: int) -> ProcessIdentity | None:
         """Record an active ``agy`` child process in the lock file."""

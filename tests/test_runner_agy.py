@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 
 from fix_die_repeat.agy_client import AgyTurnResult
 from fix_die_repeat.agy_policy import (
@@ -92,6 +93,101 @@ class TestRunAgentAndMaterializeOutput:
 
         assert rc == 0
         assert runner.paths.pr_resolved_threads_file.read_text() == "PRRT_1\nPRRT_2\n"
+
+    def test_run_agent_materializes_fix_unlinks_resolved_threads_when_empty(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """run_agent unlinks .resolved_threads when FIX returns empty resolved_thread_ids."""
+        runner, mock_client = _build_runner(tmp_path)
+        runner.paths.pr_resolved_threads_file.write_text("PRRT_OLD\n")
+        turn = AgyTurnResult(
+            returncode=0,
+            response_text="No threads resolved",
+            stderr="",
+            structured_output={
+                "outcome": "noop",
+                "summary": "No threads needed fix",
+                "files_modified": [],
+                "resolved_thread_ids": [],
+            },
+            model="claude-opus-4-6-thinking",
+        )
+        mock_client.run_turn.return_value = turn
+        runner._verify_turn_git_state = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        with patch("fix_die_repeat.runner.fetch_codexbar_snapshot", return_value=None):
+            rc, _stdout, _stderr = runner.run_agent(AgentRole.FIX, "Fix threads")
+
+        assert rc == 0
+        assert not runner.paths.pr_resolved_threads_file.exists()
+
+    def test_run_agent_improves_prompts_marks_only_matching_entries(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """IMPROVE_PROMPTS marks only introspection entries matching reviewed_thread_ids."""
+        runner, mock_client = _build_runner(tmp_path)
+        intro_file = runner.paths.fdr_home / "introspection.yaml"
+        intro_doc1 = {
+            "date": "2026-11-08",
+            "project": "proj",
+            "pr_number": 1,
+            "pr_url": "url1",
+            "status": "pending",
+            "threads": [{"id": "T1", "title": "t1"}],
+        }
+        intro_doc2 = {
+            "date": "2026-11-08",
+            "project": "proj",
+            "pr_number": 2,
+            "pr_url": "url2",
+            "status": "pending",
+            "threads": [{"id": "T2", "title": "t2"}],
+        }
+        intro_file.write_text(
+            yaml.safe_dump(intro_doc1) + "\n---\n" + yaml.safe_dump(intro_doc2),
+        )
+
+        turn = AgyTurnResult(
+            returncode=0,
+            response_text="Updated templates",
+            stderr="",
+            structured_output={
+                "reviewed_thread_ids": ["T1"],
+                "templates_updated": ["fix_checks.j2"],
+                "summary": "Added T1 guidance",
+            },
+            model="claude-opus-4-6-thinking",
+        )
+        mock_client.run_turn.return_value = turn
+        runner._verify_turn_git_state = MagicMock(return_value=True)  # type: ignore[method-assign]
+
+        with (
+            patch("fix_die_repeat.runner._get_introspection_file_path", return_value=intro_file),
+            patch("fix_die_repeat.runner.fetch_codexbar_snapshot", return_value=None),
+        ):
+            rc, _stdout, _stderr = runner.run_agent(AgentRole.IMPROVE_PROMPTS, "Improve templates")
+
+        assert rc == 0
+        docs = list(yaml.safe_load_all(intro_file.read_text()))
+        assert docs[0]["status"] == "reviewed"
+        assert docs[1]["status"] == "pending"
+
+    def test_run_agent_safe_fails_when_all_models_cooling_down(self, tmp_path: Path) -> None:
+        """run_agent_safe returns error without fallback when all models are cooling down."""
+        runner, _mock_client = _build_runner(tmp_path)
+        runner.settings.models_fix = "model-a,model-b"
+        runner.settings.quota_max_wait_s = 0
+        store = runner._get_quota_store()
+        store.record_quota_cooldown("model-a", reason="rate limit")
+        store.record_quota_cooldown("model-b", reason="quota exceeded")
+
+        with patch("fix_die_repeat.runner.fetch_codexbar_snapshot", return_value=None):
+            rc, _stdout, stderr = runner.run_agent_safe(AgentRole.FIX, "Fix")
+
+        assert rc == 1
+        assert "cooling down or exhausted" in stderr
 
     def test_run_agent_materializes_introspect_yaml(self, tmp_path: Path) -> None:
         """run_agent serializes INTROSPECT_SCHEMA output to .introspection_result.yaml."""

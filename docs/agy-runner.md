@@ -28,7 +28,7 @@ Placing `-p "<prompt>"` at the end of `argv` ensures `-p` consumes the prompt st
 - **Official binary and native authentication**: `AgyClient` invokes the installed `agy` binary directly and relies on the user's interactive `agy` login. It never extracts, inspects, or proxies OAuth tokens, cookies, or language-server credentials.
 - **Single-user personal usage**: `fix-die-repeat` never rotates across multiple accounts to pool or evade rate limits.
 - **Zero-token local checks**: Local check execution (`./scripts/ci.sh`, `pytest`), git diff inspection, and `gh` PR thread queries run in Python before invoking `agy`. If checks pass and no diff requires review, `agy` is not called.
-- **Bounded execution**: Runs are bounded by `--max-iters` (default `10`), oscillation detection, a single-instance per-repo lock (`<fdr_dir>/runner.lock`), and a rolling UTC daily call budget (`FDR_DAILY_MAX_CALLS`, default `50`).
+- **Bounded execution**: Runs are bounded by `--max-iters` (default `10`), oscillation detection, a single-instance per-repo lock (`<fdr_dir>/runner.lock`), and a UTC calendar day call budget (`FDR_DAILY_MAX_CALLS`, default `50`).
 - **Shared or multi-user CI Runners**: Do not run `fix-die-repeat` with a personal consumer login on shared, unattended, or multi-user CI runners. For unattended organization pipelines, use an API-key-backed runner (`GEMINI_API_KEY`, Vertex AI, or `ANTHROPIC_API_KEY`) or an enterprise plan that explicitly authorizes unattended CI usage.
 
 ## Role Permission Profiles and Post-Run Verification
@@ -46,10 +46,10 @@ Each agent role receives a dedicated `--settings` JSON object (`build_permission
 
 All four roles pass `--json-schema <schema>` to `agy` and return validated JSON in the terminal `result.structured_output` event (`fix_die_repeat/agy_policy.py`):
 
-- **`REVIEW_SCHEMA`**: Requires `status` (`"NO_ISSUES"` or `"ISSUES_FOUND"`), `findings` (each with `severity`, `file`, `line`, `summary`, `remediation`), and `rendered_markdown`. `AgyRunner` writes `NO_ISSUES` or the formatted Markdown report to `<fdr_dir>/review_current.md`.
-- **`FIX_SCHEMA`**: Requires `summary`, `files_modified`, `resolved_thread_ids`, and `declined_threads`. `AgyRunner` writes `resolved_thread_ids` (one per line) to `<fdr_dir>/.resolved_threads`.
-- **`INTROSPECT_SCHEMA`**: Requires `date`, `project`, `pr_number`, `pr_url`, `status` (`"pending"`), and `threads`. `AgyRunner` serializes the validated payload as YAML to `<fdr_dir>/.introspection_result.yaml`.
-- **`IMPROVE_PROMPTS_SCHEMA`**: Requires `edited_templates`, `reviewed_entries_count`, and `compaction`. When `reviewed_entries_count > 0` and Jinja2 validation passes, `AgyRunner` updates `status: pending` entries in `<FDR_HOME>/introspection.yaml` to `status: reviewed`.
+- **`REVIEW_SCHEMA`**: Requires `verdict` (`"NO_ISSUES"` or `"ISSUES"`), `issues_markdown`, and `summary`. `AgyRunner` writes `"NO_ISSUES"` or the formatted Markdown report to `<fdr_dir>/review_current.md`.
+- **`FIX_SCHEMA`**: Requires `outcome` (`"FIXED"`, `"PARTIAL"`, `"FAILED"`, or `"NOOP"`), `summary`, `files_modified`, and `resolved_thread_ids`. `AgyRunner` writes `resolved_thread_ids` (one per line) to `<fdr_dir>/.resolved_threads`, or unlinks the file when no threads were resolved.
+- **`INTROSPECT_SCHEMA`**: Requires `date`, `project`, `pr_number`, `pr_url`, `status` (`"pending"` or `"reviewed"`), and `threads` (each containing `id`, `title`, `category`, `outcome`, `summary`, `relevance`, and `lang_check_gap`). `AgyRunner` serializes the validated payload as YAML to `<fdr_dir>/.introspection_result.yaml`.
+- **`IMPROVE_PROMPTS_SCHEMA`**: Requires `reviewed_thread_ids`, `templates_updated`, and `summary`. When Jinja2 validation passes and matching thread IDs are reported, `AgyRunner` updates matching `status: pending` entries in `<FDR_HOME>/introspection.yaml` to `status: reviewed`.
 
 ## Reset-Window-Aware Model Selection (`codexbar`)
 
@@ -62,8 +62,8 @@ All four roles pass `--json-schema <schema>` to `agy` and return validated JSON 
    - `FDR_MODELS_IMPROVE_PROMPTS`: `claude-opus-4-6-thinking,gemini-3.1-pro-high,claude-sonnet-4-6-thinking`
    - Passing `-m` / `FDR_MODEL` overrides all roles with a single-element chain.
 2. **Persistent learned cooldowns (`<FDR_HOME>/quota_state.json`)**:
-   - Capacity errors (`429`, `503`, `RESOURCE_EXHAUSTED`, `overloaded`, `quota exceeded`, `rate limit`) mark the model on cooldown (`reset_at` when parsed from `agy` output, or `now + FDR_QUOTA_COOLDOWN_MINUTES`) and immediately advance to the next candidate in the role's chain.
-   - Daily call timestamps are recorded in the same atomic state file to enforce `FDR_DAILY_MAX_CALLS`.
+   - Capacity errors (`429`, `503`, `RESOURCE_EXHAUSTED`, `overloaded`, `quota exceeded`, and `rate limit`) mark the model on cooldown (`reset_at` when parsed from `agy` output, or `now + FDR_QUOTA_COOLDOWN_MINUTES` if configured, otherwise escalating through 5m, 15m, and 60m step delays) and immediately advance to the next candidate in the role's chain.
+   - Daily call counts are recorded in the same locked state file to enforce `FDR_DAILY_MAX_CALLS` across each UTC calendar day.
 3. **Live `codexbar` quota snapshot (`FDR_QUOTA_SOURCE=auto`)**:
    - When `codexbar` is on `PATH`, `fetch_codexbar_snapshot` runs `codexbar usage --provider antigravity --json --no-color` (3-second timeout).
    - Each model maps to its 5-hour (`windowMinutes == 300`) and weekly (`windowMinutes == 10080`) quota windows:

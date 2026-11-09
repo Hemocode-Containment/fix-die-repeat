@@ -53,8 +53,8 @@ All options can be set via `FDR_`-prefixed environment variables:
 | `FDR_PREFLIGHT` | Run preflight checks and exit | `0` |
 | `FDR_QUOTA_SOURCE` | Quota provider (`auto` for `codexbar`, or `none`) | `auto` |
 | `FDR_QUOTA_MAX_USED_PCT` | Skip models with any quota window at or above this used % | `95.0` |
-| `FDR_QUOTA_COOLDOWN_MINUTES` | Cooldown duration after a capacity error | `30` |
-| `FDR_DAILY_MAX_CALLS` | Rolling 24-hour cap on `agy` calls (`0` = unlimited) | `50` |
+| `FDR_QUOTA_COOLDOWN_MINUTES` | Override retry cooldown after a capacity error in minutes (default: 5m, 15m, and 60m step sequence) | (unset) |
+| `FDR_DAILY_MAX_CALLS` | Maximum `agy` calls per UTC calendar day (`0` = unlimited) | `50` |
 | `FDR_AGENT_IDLE_TIMEOUT_S` | Idle timeout when no tool is running (seconds) | `120` |
 | `FDR_AGENT_TOOL_TIMEOUT_S` | Maximum runtime for an active tool step (seconds) | `1200` |
 | `FDR_AGENT_HARD_TIMEOUT_S` | Hard wall-clock cap per `agy` turn (seconds) | `3600` |
@@ -265,4 +265,4 @@ Ensure the Google Antigravity CLI (`agy`) is installed on `PATH` (or set `FDR_AG
 
 ### Daily agent call budget reached
 
-By default, `FDR_DAILY_MAX_CALLS=50` caps rolling 24-hour `agy` invocations across runs. Increase `FDR_DAILY_MAX_CALLS` or set `FDR_DAILY_MAX_CALLS=0` to disable the cap.
+By default, `FDR_DAILY_MAX_CALLS=50` caps daily `agy` invocations per UTC calendar day across runs. Increase `FDR_DAILY_MAX_CALLS` or set `FDR_DAILY_MAX_CALLS=0` to disable the cap.

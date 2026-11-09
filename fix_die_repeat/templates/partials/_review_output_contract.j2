@@ -1,3 +1,3 @@
 Return your verdict in the enforced JSON schema (the runner writes the rendered report or "NO_ISSUES" sentinel to '{{ review_current_path }}'):
-- If you find [CRITICAL] issues, set `status` to `"ISSUES_FOUND"`, list all `[CRITICAL]` and `[NIT]` findings in `findings`, and format the full report in `rendered_markdown`.
-- If you find NO [CRITICAL] issues, set `status` to `"NO_ISSUES"`, set `findings` to `[]`, and set `rendered_markdown` to `"NO_ISSUES"`. Do NOT write to '{{ review_current_path }}' directly.
+- If you find [CRITICAL] issues, set `verdict` to `"ISSUES"`, format the issues report in `issues_markdown`, and provide a concise `summary`.
+- If you find NO [CRITICAL] issues, set `verdict` to `"NO_ISSUES"`, set `issues_markdown` to `"NO_ISSUES"`, and provide a concise `summary`. Do NOT write to '{{ review_current_path }}' directly.

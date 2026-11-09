@@ -32,7 +32,11 @@ These are the language-agnostic prompt templates (and their shared partials) who
    - Add context to `resolve_review_issues.j2` for issue types the agent struggled with.
    - Update `pr_threads_header.j2` only if you find thread-level framing gaps.
    - Prefer shared partials for guidance that should apply across review scopes. Only edit a top-level review template directly if it is one of the paths listed above and the framing is truly unique to that scope.
-5. After editing, report the number of `status: pending` entries you processed in `reviewed_entries_count` in your structured JSON response. The runner will rewrite `{{ introspection_file_path }}` so every `status: pending` entry is marked `status: reviewed` while preserving `---` document separators.
+5. Return structured output adhering to the enforced JSON schema:
+   - `reviewed_thread_ids`: List of thread IDs you reviewed and addressed from the pending entries.
+   - `templates_updated`: List of user template file paths you modified.
+   - `summary`: A concise summary of improvements made.
+   The runner will transition the processed entries in `{{ introspection_file_path }}` to `status: reviewed`.
 6. **Compact the introspection file** if it has reached 2000+ lines:
    - Keep all `pending` entries in the main file (there should be none after step 5, but future entries may land here).
    - Keep the 50 most recent `reviewed` entries in the main file, sorted by `date` descending.

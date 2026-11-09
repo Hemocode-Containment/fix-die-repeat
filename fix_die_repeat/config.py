@@ -60,11 +60,16 @@ class Settings(BaseSettings):
         description="Comma-separated model fallback chain for introspection turns",
     )
 
-    models_improve: str | None = pyd.Field(
+    models_improve_prompts: str | None = pyd.Field(
         default=None,
-        alias="FDR_MODELS_IMPROVE",
+        validation_alias=pyd.AliasChoices("FDR_MODELS_IMPROVE_PROMPTS", "FDR_MODELS_IMPROVE"),
         description="Comma-separated model fallback chain for improve-prompts turns",
     )
+
+    @property
+    def models_improve(self) -> str | None:
+        """Alias for models_improve_prompts for backward compatibility."""
+        return self.models_improve_prompts
 
     preflight: bool = pyd.Field(
         default=False,
@@ -89,6 +94,12 @@ class Settings(BaseSettings):
         default=900,
         alias="FDR_QUOTA_MAX_WAIT_S",
         description="Max seconds to sleep waiting for a window reset when all models are exhausted",
+    )
+
+    quota_cooldown_minutes: int | None = pyd.Field(
+        default=None,
+        alias="FDR_QUOTA_COOLDOWN_MINUTES",
+        description="Override retry cooldown in minutes (default: 5m, 15m, 60m sequence)",
     )
 
     daily_max_calls: int = pyd.Field(

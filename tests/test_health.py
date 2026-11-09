@@ -133,6 +133,16 @@ class TestRunnerLock:
 
         assert not lock_file.exists()
 
+    def test_blocks_concurrent_acquisition_via_flock(self, tmp_path: Path) -> None:
+        """RunnerLock raises RunnerLockError when another instance holds the flock."""
+        lock_file = tmp_path / "runner.lock"
+        lock1 = RunnerLock(lock_file)
+        lock2 = RunnerLock(lock_file)
+
+        with lock1:
+            with pytest.raises(RunnerLockError, match="already running"):
+                lock2.acquire()
+
     def test_blocks_when_held_by_live_process(self, tmp_path: Path) -> None:
         """RunnerLock raises RunnerLockError when another live process holds the lock."""
         lock_file = tmp_path / "runner.lock"
