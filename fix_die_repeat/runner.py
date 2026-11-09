@@ -375,7 +375,7 @@ class AgyRunner:
         max_calls_raw = getattr(self.settings, "daily_max_calls", 0)
         max_calls = max_calls_raw if isinstance(max_calls_raw, int) else 0
         try:
-            quota_store.check_daily_cap(max_calls)
+            quota_store.reserve_daily_call(chosen_model, max_calls)
         except AgyPolicyError as err:
             self.logger.error("%s", err)
             cap_res = AgyTurnResult(
@@ -425,7 +425,6 @@ class AgyRunner:
         )
 
         before_git = capture_git_snapshot(self.paths.project_root)
-        quota_store.increment_daily_calls(chosen_model)
         result = self._get_client().run_turn(request)
 
         if result.returncode == 0 and not self._verify_turn_git_state(role_enum, before_git):

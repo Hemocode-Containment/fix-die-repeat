@@ -9,7 +9,6 @@ Every agent turn executes as a fresh, ephemeral `agy -p` subprocess in its own p
 ```bash
 agy --output-format stream-json \
     --model <model> \
-    --dangerously-skip-permissions \
     --disable-slash-commands \
     --no-chrome \
     --print-timeout 3600 \

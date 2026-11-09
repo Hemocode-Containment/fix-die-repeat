@@ -128,6 +128,79 @@ class TestGitInvariants:
             assert verify_fix_git_state(tmp_path, before, logger) is True
             assert any("reset" in str(call) for call in mock_cmd.call_args_list)
 
+    def test_verify_readonly_git_state_preserves_preexisting_untracked_files(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """verify_readonly_git_state keeps pre-existing untracked and deletes new."""
+        _init_repo(tmp_path)
+        logger = logging.getLogger("test-git-invariants")
+        baseline_file = tmp_path / "baseline_untracked.txt"
+        baseline_file.write_text("keep me\n")
+        before = capture_git_snapshot(tmp_path)
+        assert "baseline_untracked.txt" in before.untracked_files
+
+        # Simulate agent turn creating new untracked file and mutating tracked file
+        (tmp_path / "app.py").write_text("mutated\n")
+        new_file = tmp_path / "new_rogue.txt"
+        new_file.write_text("delete me\n")
+
+        assert verify_readonly_git_state(tmp_path, before, logger) is False
+        assert baseline_file.exists()
+        assert baseline_file.read_text() == "keep me\n"
+        assert not new_file.exists()
+
+    def test_verify_fix_git_state_restores_staged_index_without_commit(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """verify_fix_git_state restores pre-turn staged index when turn stages files."""
+        logger = logging.getLogger("test-git-invariants")
+        before = GitSnapshot(
+            is_git_repo=True,
+            head_sha="aaaa1111",
+            staged_tree_sha="tree_before",
+            status_porcelain="",
+        )
+        after = GitSnapshot(
+            is_git_repo=True,
+            head_sha="aaaa1111",
+            staged_tree_sha="tree_after_staged",
+            status_porcelain="",
+        )
+        with (
+            patch("fix_die_repeat.agy_client.capture_git_snapshot", return_value=after),
+            patch("fix_die_repeat.agy_client.run_command", return_value=(0, "", "")) as mock_cmd,
+        ):
+            assert verify_fix_git_state(tmp_path, before, logger) is True
+            assert any(
+                "read-tree" in str(call) and "tree_before" in str(call)
+                for call in mock_cmd.call_args_list
+            )
+
+    def test_verify_fix_git_state_preserves_baseline_agents_untracked_files(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """verify_fix_git_state removes only newly introduced untracked files in .agents/."""
+        _init_repo(tmp_path)
+        agents_dir = tmp_path / ".agents"
+        agents_dir.mkdir()
+        baseline_agent_file = agents_dir / "user_notes.txt"
+        baseline_agent_file.write_text("user notes\n")
+
+        logger = logging.getLogger("test-git-invariants")
+        before = capture_git_snapshot(tmp_path)
+
+        # Agent introduces a new rogue file into .agents/
+        rogue_agent_file = agents_dir / "rogue.md"
+        rogue_agent_file.write_text("rogue rule\n")
+
+        assert verify_fix_git_state(tmp_path, before, logger) is False
+        assert baseline_agent_file.exists()
+        assert baseline_agent_file.read_text() == "user notes\n"
+        assert not rogue_agent_file.exists()
+
 
 class TestAgyClientBuildArgvAndRunTurn:
     """Tests for AgyClient.build_argv and stream-json NDJSON supervision."""
@@ -149,6 +222,7 @@ class TestAgyClientBuildArgvAndRunTurn:
         assert "--output-format" in argv
         assert "stream-json" in argv
         assert "--json-schema" in argv
+        assert "--dangerously-skip-permissions" not in argv
 
     def test_run_turn_parses_stream_json_and_writes_transcript(self, tmp_path: Path) -> None:
         """AgyClient.run_turn parses NDJSON events, extracts structured_output, and logs tools."""

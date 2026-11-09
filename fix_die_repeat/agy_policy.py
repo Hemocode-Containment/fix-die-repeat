@@ -508,6 +508,43 @@ class QuotaStateStore:
             self._save(data)
             return updated_count
 
+    def reserve_daily_call(
+        self,
+        model: str,
+        max_calls: int,
+        now: float | None = None,
+    ) -> int:
+        """Atomically verify daily cap and reserve an invocation slot under lock."""
+        with self._lock():
+            data = self._load()
+            today = self._utc_day(now)
+            daily = data.get("daily_runs")
+            current = 0
+            if isinstance(daily, dict) and daily.get("date") == today:
+                raw_count = daily.get("count", 0)
+                if (
+                    isinstance(raw_count, int)
+                    and not isinstance(raw_count, bool)
+                    and raw_count >= 0
+                ):
+                    current = raw_count
+
+            if max_calls > 0 and current >= max_calls:
+                msg = (
+                    f"Daily Antigravity call limit reached ({current}/{max_calls} calls today). "
+                    "Increase FDR_DAILY_MAX_CALLS (or set to 0 for unlimited) to continue."
+                )
+                raise AgyPolicyError(msg)
+
+            updated_count = current + 1
+            data["daily_runs"] = {
+                "date": today,
+                "count": updated_count,
+                "last_model": model,
+            }
+            self._save(data)
+            return updated_count
+
     def check_daily_cap(self, max_calls: int, now: float | None = None) -> None:
         """Raise :class:`AgyPolicyError` if ``max_calls > 0`` and today's cap is reached."""
         if max_calls <= 0:
@@ -775,20 +812,21 @@ def build_permission_settings(
                 f"edit_file({proj}/.agents/)",
                 f"write_file({fdr_dir}/)",
                 f"edit_file({fdr_dir}/)",
-                "command(git commit)",
-                "command(git push)",
-                "command(git reset)",
-                "command(git checkout)",
-                "command(git switch)",
-                "command(git rebase)",
-                "command(gh pr merge)",
-                "command(fix-die-repeat)",
+                "command(git commit*)",
+                "command(git push*)",
+                "command(git reset*)",
+                "command(git checkout*)",
+                "command(git switch*)",
+                "command(git rebase*)",
+                "command(gh pr merge*)",
+                "command(fix-die-repeat*)",
             ],
             "allow": [
                 f"read_file({proj})",
                 f"write_file({proj})",
                 f"edit_file({proj})",
                 f"read_file({fdr_dir})",
+                "command(*)",
             ],
         },
     }

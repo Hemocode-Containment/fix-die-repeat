@@ -118,12 +118,22 @@ class GitSnapshot:
     diff_sha256: str = ""
     staged_tree_sha: str = ""
     stash_sha: str = ""
+    untracked_files: frozenset[str] = frozenset()
+    agents_status: str = ""
 
 
 def capture_git_snapshot(project_root: Path) -> GitSnapshot:
     """Capture ``HEAD`` SHA, ``git status --porcelain``, and working-tree diff digest."""
     git_bin = shutil.which("git")
-    if not git_bin or not (project_root / ".git").exists():
+    if not git_bin:
+        return GitSnapshot(is_git_repo=False)
+
+    rc_inside, inside_out, _ = run_command(
+        [git_bin, "rev-parse", "--is-inside-work-tree"],
+        cwd=project_root,
+        check=False,
+    )
+    if rc_inside != 0 or inside_out.strip() != "true":
         return GitSnapshot(is_git_repo=False)
 
     rc_head, head_out, _ = run_command(
@@ -134,7 +144,7 @@ def capture_git_snapshot(project_root: Path) -> GitSnapshot:
     head_sha = head_out.strip() if rc_head == 0 else ""
 
     rc_status, status_out, _ = run_command(
-        [git_bin, "status", "--porcelain"],
+        [git_bin, "status", "--porcelain", "-u"],
         cwd=project_root,
         check=False,
     )
@@ -155,6 +165,20 @@ def capture_git_snapshot(project_root: Path) -> GitSnapshot:
     )
     stash_sha = stash_out.strip() if rc_stash == 0 else ""
 
+    rc_untracked, untracked_out, _ = run_command(
+        [git_bin, "ls-files", "--others", "--exclude-standard"],
+        cwd=project_root,
+        check=False,
+    )
+    untracked_files = frozenset(untracked_out.splitlines()) if rc_untracked == 0 else frozenset()
+
+    rc_agents, agents_out, _ = run_command(
+        [git_bin, "status", "--porcelain", "-u", "--", ".agents"],
+        cwd=project_root,
+        check=False,
+    )
+    agents_status = agents_out if rc_agents == 0 else ""
+
     return GitSnapshot(
         is_git_repo=True,
         head_sha=head_sha,
@@ -162,7 +186,35 @@ def capture_git_snapshot(project_root: Path) -> GitSnapshot:
         diff_sha256=diff_sha256,
         staged_tree_sha=staged_tree_sha,
         stash_sha=stash_sha,
+        untracked_files=untracked_files,
+        agents_status=agents_status,
     )
+
+
+def _revert_readonly_mutation(
+    project_root: Path,
+    before: GitSnapshot,
+    after: GitSnapshot,
+    git_bin: str,
+) -> None:
+    if before.head_sha:
+        run_command(
+            [git_bin, "reset", "--hard", before.head_sha],
+            cwd=project_root,
+            check=False,
+        )
+    for new_untracked in after.untracked_files - before.untracked_files:
+        target = project_root / new_untracked
+        if target.is_file() or target.is_symlink():
+            target.unlink(missing_ok=True)
+        elif target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+    if before.stash_sha:
+        run_command(
+            [git_bin, "stash", "apply", "--index", before.stash_sha],
+            cwd=project_root,
+            check=False,
+        )
 
 
 def verify_readonly_git_state(
@@ -184,22 +236,37 @@ def verify_readonly_git_state(
 
     if mutated:
         logger.error("Read-only agy turn mutated HEAD, working tree, or index; restoring snapshot.")
-        if before.head_sha:
-            run_command(
-                [git_bin, "reset", "--hard", before.head_sha],
-                cwd=project_root,
-                check=False,
-            )
-        run_command([git_bin, "clean", "-fd"], cwd=project_root, check=False)
-        if before.stash_sha:
-            run_command(
-                [git_bin, "stash", "apply", "--index", before.stash_sha],
-                cwd=project_root,
-                check=False,
-            )
+        _revert_readonly_mutation(project_root, before, after, git_bin)
         return False
 
     return True
+
+
+def _revert_agents_mutation(
+    project_root: Path,
+    before: GitSnapshot,
+    after: GitSnapshot,
+    git_bin: str,
+) -> None:
+    for new_untracked in after.untracked_files - before.untracked_files:
+        if new_untracked.startswith(".agents/") or new_untracked == ".agents":
+            target = project_root / new_untracked
+            if target.is_file() or target.is_symlink():
+                target.unlink(missing_ok=True)
+            elif target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+    if before.stash_sha:
+        run_command(
+            [git_bin, "checkout", before.stash_sha, "--", ".agents"],
+            cwd=project_root,
+            check=False,
+        )
+    elif before.head_sha:
+        run_command(
+            [git_bin, "checkout", before.head_sha, "--", ".agents"],
+            cwd=project_root,
+            check=False,
+        )
 
 
 def verify_fix_git_state(
@@ -227,16 +294,19 @@ def verify_fix_git_state(
                 cwd=project_root,
                 check=False,
             )
+    elif before.staged_tree_sha and after.staged_tree_sha != before.staged_tree_sha:
+        logger.warning(
+            "Fix turn staged changes without committing; restoring pre-turn staged index",
+        )
+        run_command(
+            [git_bin, "read-tree", before.staged_tree_sha],
+            cwd=project_root,
+            check=False,
+        )
 
-    rc_agents, agents_status, _ = run_command(
-        [git_bin, "status", "--porcelain", "--", ".agents"],
-        cwd=project_root,
-        check=False,
-    )
-    if rc_agents == 0 and agents_status.strip():
+    if after.agents_status != before.agents_status:
         logger.error("Fix turn modified protected .agents/ customizations; reverting .agents/.")
-        run_command([git_bin, "checkout", "--", ".agents"], cwd=project_root, check=False)
-        run_command([git_bin, "clean", "-fd", "--", ".agents"], cwd=project_root, check=False)
+        _revert_agents_mutation(project_root, before, after, git_bin)
         return False
 
     return True
@@ -332,7 +402,6 @@ class AgyClient:
             "--print-timeout",
             f"{max(1, int(request.hard_timeout_s))}s",
             "--disable-slash-commands",
-            "--dangerously-skip-permissions",
             "--model",
             request.model,
         ]

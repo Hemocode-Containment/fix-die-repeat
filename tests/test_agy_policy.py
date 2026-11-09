@@ -252,6 +252,21 @@ class TestQuotaStateStore:
         with pytest.raises(AgyPolicyError, match="Daily Antigravity call limit reached"):
             store.check_daily_cap(DAILY_CAP_LIMIT, now=now_epoch)
 
+    def test_reserve_daily_call_atomically_enforces_cap(self, tmp_path: Path) -> None:
+        """reserve_daily_call checks cap and increments count atomically under lock."""
+        store = QuotaStateStore(tmp_path / "quota_state.json")
+        now_epoch = datetime(2026, 11, 8, 12, 0, tzinfo=UTC).timestamp()
+
+        assert store.reserve_daily_call("model-a", DAILY_CAP_LIMIT, now=now_epoch) == 1
+        assert (
+            store.reserve_daily_call("model-a", DAILY_CAP_LIMIT, now=now_epoch) == DAILY_CAP_LIMIT
+        )
+
+        with pytest.raises(AgyPolicyError, match="Daily Antigravity call limit reached"):
+            store.reserve_daily_call("model-a", DAILY_CAP_LIMIT, now=now_epoch)
+
+        assert store.daily_calls_used(now=now_epoch) == DAILY_CAP_LIMIT
+
     def test_quota_error_and_iso_timestamp_parsing(self) -> None:
         """is_quota_error and parse_iso_timestamp detect rate-limit messages and timestamps."""
         assert is_quota_error("Error 429: RESOURCE_EXHAUSTED until 2026-11-08T15:00:00Z")
@@ -301,8 +316,9 @@ class TestPermissionSettingsAndPreflight:
         deny = permissions["deny"]
         assert isinstance(deny, list)
         assert f"write_file({fdr_dir.resolve()}/)" in deny
-        assert "command(git commit)" in deny
-        assert "command(git push)" in deny
+        assert "command(git commit*)" in deny
+        assert "command(git push*)" in deny
+        assert "command(*)" in permissions["allow"]
 
     def test_ensure_agy_ready_uses_cache_when_version_matches(self, tmp_path: Path) -> None:
         """ensure_agy_ready skips smoke test when cached version matches."""
