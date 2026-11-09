@@ -13,6 +13,14 @@ if [[ "${1:-}" == "--check-only" ]]; then
     CHECK_ONLY=true
 fi
 
+# Ensure local repository uses version-controlled git hooks (.githooks)
+if [ -d ".githooks" ] && command -v git &> /dev/null && git rev-parse --is-inside-work-tree &> /dev/null; then
+    CURRENT_HOOKS_PATH="$(git config --get core.hooksPath 2>/dev/null || true)"
+    if [ "$CURRENT_HOOKS_PATH" != ".githooks" ]; then
+        git config core.hooksPath .githooks 2>/dev/null || true
+    fi
+fi
+
 # Use uv run to execute tools from the project's virtual environment
 if command -v uv &> /dev/null; then
     RUFF="uv run ruff"

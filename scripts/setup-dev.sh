@@ -33,16 +33,18 @@ fi
 
 # Sync project + dev dependencies from pyproject.toml/uv.lock
 echo "📦 Syncing development dependencies with uv..."
-uv sync --extra dev
+uv sync --all-extras
 
-# Install pre-commit hooks through uv-managed environment
-echo "🪝 Installing pre-commit hooks..."
-uv run pre-commit install
-echo "✅ Pre-commit hooks installed"
+# Configure git to use committed hooks
+echo "🪝 Configuring git hooks (.githooks)..."
+git config core.hooksPath .githooks
+echo "✅ Git hooks configured"
 
 echo "✅ Development environment setup complete!"
 echo ""
 echo "You can now commit your changes. The pre-commit hook will run:"
+echo "  - Ruff NEVER-IGNORE policy validation"
 echo "  - Ruff linting"
 echo "  - Ruff format check"
 echo "  - MyPy type checking"
+echo "  - Pytest with coverage"
