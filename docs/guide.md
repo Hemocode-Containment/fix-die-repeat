@@ -12,7 +12,7 @@ Usage: fix-die-repeat [OPTIONS]
 Options:
   -c, --check-cmd TEXT            Command to run checks (default: auto-detected)
   -n, --max-iters INTEGER         Maximum loop iterations (default: 10)
-  -m, --model TEXT                Override model selection (e.g., anthropic/claude-sonnet-4-5)
+  -m, --model TEXT                Override model selection (e.g., claude-opus-4-6-thinking)
   --max-pr-threads INTEGER        Maximum PR threads to process per iteration (default: 5)
   --archive-artifacts             Archive existing artifacts to a timestamped folder
   --no-compact                    Skip automatic compaction of large artifacts
@@ -26,10 +26,11 @@ Options:
   --pr-threads-introspect-only    Fetch the PR's unresolved review threads, run introspection
                                   on them, then exit. Does not run checks, local review, or
                                   attempt fixes.
-  --improve-prompts               Ask pi to update the user-owned prompt templates under
+  --improve-prompts               Ask agy to update the user-owned prompt templates under
                                   <FDR_HOME>/templates/ based on accumulated introspection data.
                                   Seeds user copies on first use; never mutates the package.
-  --test-model TEXT               Test model compatibility before running (exits after test)
+  --preflight                     Run Antigravity CLI, model catalog, and structured-output
+                                  preflight checks, then exit.
   -d, --debug                     Enable debug mode (timestamped session logs and verbose logging)
   --version                       Show the version and exit.
   --help                          Show this message and exit.
@@ -43,8 +44,20 @@ All options can be set via `FDR_`-prefixed environment variables:
 |-----------|-------------|----------|
 | `FDR_CHECK_CMD` | Command to run checks | (auto-detected) |
 | `FDR_MAX_ITERS` | Maximum loop iterations | `10` |
-| `FDR_MODEL` | Override model selection | (none) |
-| `FDR_TEST_MODEL` | Test model compatibility and exit | (none) |
+| `FDR_AGY_BIN` | Antigravity CLI binary name or path | `agy` |
+| `FDR_MODEL` | Override model selection across all roles | (none) |
+| `FDR_MODELS_FIX` | Ordered model fallback chain for `fix` | `claude-opus-4-6-thinking,claude-sonnet-4-6-thinking,gemini-3.1-pro-high,gemini-3-flash,gpt-oss-120b-medium` |
+| `FDR_MODELS_REVIEW` | Ordered model fallback chain for `review` | `claude-opus-4-6-thinking,gemini-3.1-pro-high,claude-sonnet-4-6-thinking,gemini-3-flash,gpt-oss-120b-medium` |
+| `FDR_MODELS_INTROSPECT` | Ordered model fallback chain for `introspect` | `gemini-3.1-pro-low,gemini-3-flash,claude-sonnet-4-6,gpt-oss-120b-medium` |
+| `FDR_MODELS_IMPROVE_PROMPTS` | Ordered model fallback chain for `improve_prompts` | `claude-opus-4-6-thinking,gemini-3.1-pro-high,claude-sonnet-4-6-thinking` |
+| `FDR_PREFLIGHT` | Run preflight checks and exit | `0` |
+| `FDR_QUOTA_SOURCE` | Quota provider (`auto` for `codexbar`, or `none`) | `auto` |
+| `FDR_QUOTA_MAX_USED_PCT` | Skip models with any quota window at or above this used % | `95.0` |
+| `FDR_QUOTA_COOLDOWN_MINUTES` | Override retry cooldown after a capacity error in minutes (default: 5m, 15m, and 60m step sequence) | (unset) |
+| `FDR_DAILY_MAX_CALLS` | Maximum `agy` calls per UTC calendar day (`0` = unlimited) | `50` |
+| `FDR_AGENT_IDLE_TIMEOUT_S` | Idle timeout when no tool is running (seconds) | `120` |
+| `FDR_AGENT_TOOL_TIMEOUT_S` | Maximum runtime for an active tool step (seconds) | `1200` |
+| `FDR_AGENT_HARD_TIMEOUT_S` | Hard wall-clock cap per `agy` turn (seconds) | `3600` |
 | `FDR_MAX_PR_THREADS` | PR threads per iteration | `5` |
 | `FDR_ARCHIVE_ARTIFACTS` | Archive existing artifacts | `0` |
 | `FDR_COMPACT_ARTIFACTS` | Auto-compact large artifacts | `1` |
@@ -63,7 +76,7 @@ All options can be set via `FDR_`-prefixed environment variables:
 
 ## Check Command Resolution
 
-fix-die-repeat automatically finds your project's check command using this priority chain:
+`fix-die-repeat` automatically finds your project's check command using this priority chain:
 
 1. **CLI flag / env var** (`-c` / `FDR_CHECK_CMD`)
 2. **Project config** (`~/.fix-die-repeat/repos/<slug>/config`)
@@ -91,14 +104,7 @@ fix-die-repeat automatically finds your project's check command using this prior
 
 ### Config Files
 
-**Project config** (`~/.fix-die-repeat/repos/<slug>/config`) — per-project, stored
-in a central directory so no files are written inside the repo. The slug is
-`<project-directory-name>-<8charhash>`: the basename comes from the local
-project directory name, while the hash is computed from the git `origin`
-remote URL (or the absolute path if there is no remote). This means two clones
-of the same remote in differently named local directories will not share the
-same state dir. Override the base directory with `FDR_HOME` if you want state
-somewhere other than `~/.fix-die-repeat/`.
+**Project config** (`~/.fix-die-repeat/repos/<slug>/config`) — per-project, stored in a central directory so no files are written inside the repo. Override the base directory with `FDR_HOME` if you want state somewhere other than `~/.fix-die-repeat/`.
 ```toml
 check_cmd = "uv run pytest"
 ```
@@ -108,38 +114,28 @@ check_cmd = "uv run pytest"
 check_cmd = "pytest"
 ```
 
-### CI/CD Usage
-
-In non-interactive environments, always provide the check command explicitly:
-
-```bash
-fix-die-repeat -c "pytest"
-# or
-export FDR_CHECK_CMD="pytest"
-```
-
 ---
 
 ## How It Works
 
 ### The Time Loop
 
-1. **Checkpoint**: Record the starting commit SHA (for rollback).
+1. **Checkpoint**: Acquire `<fdr_dir>/runner.lock` and record the starting commit SHA (for rollback).
 2. **Check Phase**: Run your check command.
    - Exit code **0** → proceed to review.
    - Non-zero → enter Fix Phase.
-3. **Fix Phase**: Filter check output to error-relevant lines, invoke pi to fix them, re-run checks.
-4. **Review Phase**: Generate a git diff, invoke pi to review. If pi finds **[CRITICAL]** issues, fix them and loop back. If `NO_ISSUES` → exit successfully.
+3. **Fix Phase**: Filter check output to error-relevant lines, invoke `agy` (`AgentRole.FIX`) to fix them, verify git invariants, and re-run checks.
+4. **Review Phase**: Generate a git diff and invoke `agy` (`AgentRole.REVIEW`) in a read-only permission profile. If `agy` returns `ISSUES_FOUND`, `AgyRunner` writes `<fdr_dir>/review_current.md`, invokes `agy` (`AgentRole.FIX`) to resolve the findings, and loops back. If `NO_ISSUES` → exit `0`.
 
 ### Context Management
 
-- Files under 200KB are attached directly to pi's prompt
-- Larger changesets are listed for pi to selectively `read`
+- Files under 200KB are referenced in the prompt for `agy` to inspect
+- Larger changesets are listed with line counts so `agy` can selectively call `read_file`
 - Historical artifacts are compacted when they exceed 150–200 lines
 
 ### Oscillation Detection
 
-Check output hashes are tracked across iterations. If the same output repeats, the tool warns you're going in circles — time to change tactics.
+Check output hashes are tracked across iterations. If the same output repeats, the tool warns the agent to change tactics.
 
 ---
 
@@ -153,8 +149,8 @@ fix-die-repeat --pr-review
 
 This will:
 - Fetch unresolved threads from the current branch's PR
-- Have pi analyze and fix the issues
-- Only resolve threads that pi actually addressed (safety intersection)
+- Have `agy` analyze and fix the issues
+- Materialize `resolved_thread_ids` from `FIX_SCHEMA` to `.resolved_threads` and resolve only threads in the in-scope intersection
 - Repeat until all threads are resolved
 
 Requirements: you must be on a branch with an open PR, and `gh auth status` must succeed.
@@ -171,9 +167,7 @@ fix-die-repeat --pr-review --max-pr-threads 3
 fix-die-repeat --pr-review-introspect
 ```
 
-Implies `--pr-review` and additionally runs prompt introspection on the
-processed threads, analyzing real-world feedback to surface prompt-improvement
-opportunities.
+Implies `--pr-review` and additionally runs prompt introspection (`AgentRole.INTROSPECT`) on the processed threads, serializing schema-validated YAML entries to `~/.fix-die-repeat/introspection.yaml`.
 
 ### PR Threads Introspect-Only
 
@@ -181,9 +175,7 @@ opportunities.
 fix-die-repeat --pr-threads-introspect-only
 ```
 
-Fetches the PR's unresolved review threads, runs introspection on them, and
-exits. Skips checks, local review, and fixes — useful when you only want the
-analysis without touching the code.
+Fetches the PR's unresolved review threads, runs introspection on them, and exits without running checks or modifying code.
 
 ### Improve Prompts
 
@@ -191,24 +183,13 @@ analysis without touching the code.
 fix-die-repeat --improve-prompts
 ```
 
-Reads `~/.fix-die-repeat/introspection.yaml` and asks pi to update the
-language-agnostic prompt templates (`fix_checks.j2`, `local_review.j2`,
-`resolve_review_issues.j2`, `pr_threads_header.j2`) and the shared review
-partials under `partials/` (checklist, issue classification, reporting rules,
-output contract, etc.) so future runs close the gaps surfaced by real PR
-feedback. The user-owned copies live under `~/.fix-die-repeat/templates/` and
-take precedence over the shipped defaults; they are seeded from the package on
-first use and never mutated inside the install. Editing a partial changes every
-review mode that composes it (`local_review`, `contextual_review`,
-`full_codebase_review`). Pending introspection entries are marked `reviewed`
-once pi has processed them.
+Reads `~/.fix-die-repeat/introspection.yaml` and runs `agy` (`AgentRole.IMPROVE_PROMPTS`) to update the user-owned prompt templates under `~/.fix-die-repeat/templates/`. After the turn, `fix-die-repeat` validates that every template parses as valid Jinja2 (rolling back on syntax error) and marks pending introspection entries `reviewed`.
 
 ---
 
 ## Review-Only Modes
 
-These report-only modes never attempt fixes; they produce a review report
-and exit.
+These report-only modes run under the read-only `review` permission profile and verify that the git working tree and `HEAD` remain unchanged.
 
 ### Contextual Review
 
@@ -227,8 +208,7 @@ Smart scope detection:
 fix-die-repeat --full-codebase-review
 ```
 
-Audits the entire codebase instead of a diff. Takes precedence over
-`--pr-review` if both are set.
+Audits the entire codebase instead of a diff. Takes precedence over `--pr-review` if both are set.
 
 ---
 
@@ -238,15 +218,13 @@ Audits the entire codebase instead of a diff. Takes precedence over
 fix-die-repeat --debug
 ```
 
-Creates timestamped session logs in `~/.fix-die-repeat/repos/<slug>/` and enables verbose console output for troubleshooting.
+Creates timestamped session logs in `~/.fix-die-repeat/repos/<slug>/`, stores raw NDJSON event streams under `<fdr_dir>/agy/`, and enables verbose console output.
 
 ---
 
 ## Notifications (Optional)
 
-Notifications are optional. If you have an [ntfy](https://ntfy.sh/) server running, fix-die-repeat can notify you when runs complete. If no server is reachable, the tool silently continues — no setup is required to use fix-die-repeat without notifications.
-
-The notification topic is derived from your repository name.
+If you have an [ntfy](https://ntfy.sh/) server running, `fix-die-repeat` can notify you when runs complete.
 
 ```bash
 # Disable notifications explicitly
@@ -263,8 +241,8 @@ export FDR_NTFY_URL="http://your-server:2586"
 | Code | Meaning |
 |-------|----------|
 | 0 | Escaped the loop — checks pass and review reports no issues |
-| 1 | Max iterations exceeded or unexpected error |
-| 130 | Interrupted by user (Ctrl+C) |
+| 1 | Max iterations exceeded, preflight failure, or unexpected error |
+| 130 | Interrupted by user (`Ctrl+C`) |
 
 On failure, the tool logs instructions for viewing or reverting changes:
 
@@ -277,37 +255,14 @@ git checkout <start-sha> -- .
 
 ## Troubleshooting
 
-### pi not found
+### `agy` not found or preflight failed
 
-Install [pi](https://github.com/mariozechner/pi) and ensure it's on your PATH.
+Ensure the Google Antigravity CLI (`agy`) is installed on `PATH` (or set `FDR_AGY_BIN=/path/to/agy`) and run `fix-die-repeat --preflight` to verify model catalog access and structured output.
 
-### Not a git repository
+### Another `fix-die-repeat` run is already active
 
-fix-die-repeat requires a Git repository to track changes and generate diffs. Initialize one with `git init` or navigate to an existing repo before running.
+`fix-die-repeat` acquires `<fdr_dir>/runner.lock` with PID and start-time identity verification. Wait for the active run to finish; if the previous process exited abnormally, the next run automatically reclaims the stale lock.
 
-### Oscillation warning
+### Daily agent call budget reached
 
-The same check output has repeated — the current fix strategy isn't working. Try a fundamentally different approach.
-
-### PR review: "No open PR found"
-
-- Verify you're on a branch with an associated PR: `gh pr view --web`
-- Verify authentication: `gh auth status`
-
-### "Edit commands failed" but files show as changed
-
-pi tried to edit but the old text didn't match exactly (whitespace or encoding differences). The tool retries automatically.
-
----
-
-## Alternative Installation
-
-If you prefer to clone the repository first:
-
-```bash
-git clone https://github.com/CTristan/fix-die-repeat.git
-cd fix-die-repeat
-uv tool install .
-```
-
-For editable dev installs and tooling setup, see [CONTRIBUTING.md](../CONTRIBUTING.md).
+By default, `FDR_DAILY_MAX_CALLS=50` caps daily `agy` invocations per UTC calendar day across runs. Increase `FDR_DAILY_MAX_CALLS` or set `FDR_DAILY_MAX_CALLS=0` to disable the cap.

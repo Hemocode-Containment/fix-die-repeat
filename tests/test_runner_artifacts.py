@@ -7,7 +7,7 @@ import pytest
 
 from fix_die_repeat import runner as runner_module
 from fix_die_repeat.messages import oscillation_warning
-from fix_die_repeat.runner import PiRunner
+from fix_die_repeat.runner import AgyRunner
 
 # Constants for runner test values
 TEST_PI_DELAY_SECONDS = 2
@@ -39,7 +39,7 @@ class TestEmergencyCompaction:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -62,7 +62,7 @@ class TestEmergencyCompaction:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -86,7 +86,7 @@ class TestCheckCompactionNeeded:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -110,7 +110,7 @@ class TestCheckCompactionNeeded:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -134,7 +134,7 @@ class TestCheckCompactionNeeded:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -157,7 +157,7 @@ class TestCheckCompactionNeeded:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -181,7 +181,7 @@ class TestPerformEmergencyCompaction:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -213,7 +213,7 @@ class TestPerformRegularCompaction:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -244,7 +244,7 @@ class TestCheckOscillation:
         paths.checks_hash_file = tmp_path / "checks_hashes"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 1
@@ -264,7 +264,7 @@ class TestCheckOscillation:
         paths.checks_hash_file = tmp_path / "checks_hashes"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 2
@@ -291,7 +291,7 @@ class TestCheckOscillation:
         paths.checks_hash_file = tmp_path / "checks_hashes"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = 3
@@ -322,7 +322,7 @@ class TestCheckAndCompactArtifacts:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -341,7 +341,7 @@ class TestCheckAndCompactArtifacts:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -366,7 +366,7 @@ class TestCheckAndCompactArtifacts:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -391,7 +391,7 @@ class TestCheckAndCompactArtifacts:
         paths.build_history_file = tmp_path / "build_history.md"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -417,7 +417,7 @@ class TestFilterChecksLog:
         paths.checks_filtered_log = tmp_path / "checks_filtered.log"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -441,7 +441,7 @@ class TestFilterChecksLog:
         paths.checks_filtered_log = tmp_path / "checks_filtered.log"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -473,7 +473,7 @@ class TestFilterChecksLog:
         paths.checks_filtered_log = tmp_path / "checks_filtered.log"
         paths.pi_log = tmp_path / "pi.log"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()

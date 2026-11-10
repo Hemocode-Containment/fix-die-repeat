@@ -25,5 +25,6 @@ The changed files include {{ languages | join(", ") }} code. Use idiomatic patte
 Your goal is to FIX the errors. Follow this plan:
 1. ANALYZE the log and identify the root cause.
 2. PLAN your fix.
-3. APPLY the fix using 'edit'.
-4. VERIFY with a quick targeted check (e.g., compile the affected file, run the specific failing test). You MAY run the checks script (e.g., ./checks.sh or the command in `{{ check_cmd }}`) using the 'bash' tool to verify your fix. Prefer targeted invocations over running the full CI pipeline.
+3. APPLY the fix using 'edit_file' or 'write_file'.
+4. VERIFY with a quick targeted check (e.g., compile the affected file, run the specific failing test). You MAY run the checks script (e.g., ./checks.sh or the command in `{{ check_cmd }}`) using the 'run_command' tool to verify your fix. Prefer targeted invocations over running the full CI pipeline.
+5. Return your final summary and modified files in the enforced JSON schema.

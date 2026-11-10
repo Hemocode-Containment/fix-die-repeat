@@ -23,6 +23,7 @@ if sys.platform == "win32":  # pragma: no cover
 else:  # pragma: no cover
     import fcntl
 
+from fix_die_repeat.agy_policy import AgentRole
 from fix_die_repeat.config import Paths, Settings, get_introspection_file_path
 from fix_die_repeat.prompts import render_prompt
 from fix_die_repeat.utils import run_command
@@ -159,7 +160,7 @@ class IntrospectionManager:
 
     Handles:
     - Collecting PR thread data and agent outcomes
-    - Running introspection analysis via pi
+    - Running introspection analysis via agy
     - Appending results to global introspection file
     """
 
@@ -188,7 +189,7 @@ class IntrospectionManager:
         self,
         iteration: int,
         start_sha: str,
-        run_pi_callback: Callable[..., tuple[int, str, str]],
+        run_agent_callback: Callable[..., tuple[int, str, str]],
         *,
         introspect_only: bool = False,
     ) -> None:
@@ -196,7 +197,7 @@ class IntrospectionManager:
 
         This is a post-run step that:
         1. Collects PR thread data and agent outcomes
-        2. Calls pi with the introspection prompt template
+        2. Calls agy with the introspection prompt template
         3. Appends the result to the global introspection file
 
         This step does NOT block or fail the overall run. Any errors are
@@ -205,7 +206,7 @@ class IntrospectionManager:
         Args:
             iteration: Current iteration number
             start_sha: Starting git commit SHA
-            run_pi_callback: Function to run pi (from PiRunner)
+            run_agent_callback: Function to run agy (from AgyRunner)
             introspect_only: If True, skip fix-loop assumptions and mark every
                 in-scope thread with outcome "not-attempted"
 
@@ -228,7 +229,7 @@ class IntrospectionManager:
                 )
                 return
 
-            # Render prompt and build pi command
+            # Render prompt and invoke agy
             prompt = render_prompt(
                 "introspect_pr_review.j2",
                 run_date=datetime.now(tz=UTC).strftime("%Y-%m-%d"),
@@ -237,24 +238,26 @@ class IntrospectionManager:
                 pr_url=pr_info.url,
                 output_path=str(self.paths.introspection_result_file),
             )
-            pi_args = ["-p", "--tools", "read,write"]
-            pi_args.append(f"@{self.paths.introspection_data_file}")
 
-            # Run pi and validate result
+            # Run agy and validate result
             self.logger.info(
-                "[Introspection] Calling pi to analyze PR threads...",
+                "[Introspection] Calling agy to analyze PR threads...",
             )
-            returncode, _stdout, _stderr = run_pi_callback(*pi_args, prompt)
+            returncode, _stdout, _stderr = run_agent_callback(
+                AgentRole.INTROSPECT,
+                prompt,
+                attachments=[str(self.paths.introspection_data_file)],
+            )
 
             if returncode != 0:
                 self.logger.warning(
-                    "[Introspection] pi call failed (exit %s), skipping introspection",
+                    "[Introspection] agy call failed (exit %s), skipping introspection",
                     returncode,
                 )
                 return
 
             # Validate result file and content
-            result_content = self._validate_pi_result_file()
+            result_content = self._validate_agent_result_file()
             if result_content is None:
                 return
 
@@ -277,7 +280,7 @@ class IntrospectionManager:
                 global_introspection_file,
             )
 
-            # Result file consumed; safe to remove. Any earlier return (pi
+            # Result file consumed; safe to remove. Any earlier return (agy
             # failure, validation failure, exception) leaves it on disk so
             # the analysis can be recovered manually.
             self.paths.introspection_result_file.unlink(missing_ok=True)
@@ -370,8 +373,8 @@ class IntrospectionManager:
             url=pr_url,
         )
 
-    def _validate_pi_result_file(self) -> str | None:
-        """Validate that pi created a valid result file.
+    def _validate_agent_result_file(self) -> str | None:
+        """Validate that a valid introspection result file was produced.
 
         Returns:
             Result content if valid, None otherwise
@@ -380,7 +383,7 @@ class IntrospectionManager:
         # Check if result file was created
         if not self.paths.introspection_result_file.exists():
             self.logger.warning(
-                "[Introspection] pi did not create result file, skipping",
+                "[Introspection] agy did not produce result file, skipping",
             )
             return None
 

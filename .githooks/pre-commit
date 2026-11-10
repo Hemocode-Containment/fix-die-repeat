@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# Runs the full repository CI checks against the staged index snapshot.
+# The isolated worktree prevents unstaged working-tree edits from masking or causing failures.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(git rev-parse --show-toplevel)"
+
+# Do not run inside an existing pre-commit snapshot
+if [[ "${FDR_PRE_COMMIT_ACTIVE:-0}" == "1" ]]; then
+    exit 0
+fi
+
+# Clean Git's repository-local environment to avoid leaking index/worktree variables
+if ! GIT_LOCAL_ENV_OUTPUT="$(git rev-parse --local-env-vars)"; then
+    printf 'Pre-commit error: Git could not enumerate local environment.\n' >&2
+    exit 1
+fi
+
+ORIGINAL_GIT_INDEX_FILE="${GIT_INDEX_FILE-}"
+ORIGINAL_GIT_INDEX_SET="${GIT_INDEX_FILE+x}"
+while IFS= read -r variable; do
+    if [ -n "$variable" ]; then
+        unset "$variable"
+    fi
+done <<< "$GIT_LOCAL_ENV_OUTPUT"
+if [ "$ORIGINAL_GIT_INDEX_SET" = x ]; then
+    export GIT_INDEX_FILE="$ORIGINAL_GIT_INDEX_FILE"
+fi
+
+# Materialize the staged index into a tree object
+if ! STAGED_TREE="$(git -C "$REPOSITORY_ROOT" write-tree 2>/dev/null)"; then
+    printf 'Pre-commit error: Git could not materialize staged index.\n' >&2
+    exit 1
+fi
+unset GIT_INDEX_FILE
+
+# Verify HEAD exists (handle initial commit edge-case if repo has no commits)
+HAS_HEAD=1
+if ! git -C "$REPOSITORY_ROOT" rev-parse --verify HEAD >/dev/null 2>&1; then
+    HAS_HEAD=0
+fi
+
+TEMP_ROOT="${TMPDIR:-/tmp}"
+if ! SNAPSHOT_DIR="$(mktemp -d "$TEMP_ROOT/fdr-pre-commit.XXXXXX")"; then
+    printf 'Pre-commit error: could not create isolated snapshot directory.\n' >&2
+    exit 1
+fi
+
+if ! SNAPSHOT_DIR="$(cd "$SNAPSHOT_DIR" && pwd -P)"; then
+    printf 'Pre-commit error: could not resolve snapshot directory.\n' >&2
+    rm -rf -- "$SNAPSHOT_DIR"
+    exit 1
+fi
+
+SNAPSHOT_REGISTERED=0
+cleanup_snapshot() {
+    local status=$?
+
+    if [ "$SNAPSHOT_REGISTERED" -eq 1 ]; then
+        git -C "$REPOSITORY_ROOT" worktree remove --force "$SNAPSHOT_DIR" >/dev/null 2>&1 || true
+        SNAPSHOT_REGISTERED=0
+    fi
+
+    if [ -d "$SNAPSHOT_DIR" ]; then
+        rm -rf -- "$SNAPSHOT_DIR" 2>/dev/null || true
+    fi
+
+    # Ensure repository virtualenv points back to repository root
+    if [ -d "$REPOSITORY_ROOT/.venv" ] && command -v uv &>/dev/null; then
+        (cd "$REPOSITORY_ROOT" && uv pip install -e . --no-deps >/dev/null 2>&1 || true)
+    fi
+
+    exit "$status"
+}
+
+trap cleanup_snapshot EXIT INT TERM
+
+if [ "$HAS_HEAD" -eq 1 ]; then
+    if ! git -C "$REPOSITORY_ROOT" worktree add --detach --quiet "$SNAPSHOT_DIR" HEAD; then
+        printf 'Pre-commit error: could not create isolated worktree.\n' >&2
+        exit 1
+    fi
+    SNAPSHOT_REGISTERED=1
+
+    if ! git -C "$SNAPSHOT_DIR" read-tree --reset -u "$STAGED_TREE"; then
+        printf 'Pre-commit error: could not populate staged snapshot tree.\n' >&2
+        exit 1
+    fi
+else
+    # Fallback for initial commit before any HEAD exists
+    SNAPSHOT_REGISTERED=0
+    rm -rf -- "$SNAPSHOT_DIR"
+    echo "🔍 Running pre-commit CI checks on initial commit..."
+    exec bash "$REPOSITORY_ROOT/scripts/ci.sh" --check-only
+fi
+
+echo "🔍 Running pre-commit CI checks on staged snapshot..."
+export FDR_PRE_COMMIT_ACTIVE=1
+(
+    cd "$SNAPSHOT_DIR"
+    if command -v uv >/dev/null 2>&1; then
+        uv sync --all-extras --quiet
+    fi
+    exec bash "$SNAPSHOT_DIR/scripts/ci.sh" --check-only
+)

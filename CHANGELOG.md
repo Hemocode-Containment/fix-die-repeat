@@ -9,25 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Node.js sidecar bridge for pi invocation. `fix-die-repeat` now drives pi via the `@mariozechner/pi-coding-agent` SDK through a small Node.js process at `priv/pi-bridge/bridge.js`. Every pi call routes through a JSON-lines protocol on stdin/stdout, enabling a structured event stream (text deltas, tool-execution start/end, thinking, agent end) and clean lifecycle management. See [`docs/pi-bridge.md`](docs/pi-bridge.md) for the design note.
-- Idle-based prompt timeout for the pi bridge. The Python side now fails a prompt only when the bridge stops emitting events (`FDR_PI_IDLE_TIMEOUT_S`, default 120s), with a separate absolute cap (`FDR_PI_HARD_TIMEOUT_S`, default 60 min) as a safety net. Long contextual reviews that stream tool-execution events every few seconds no longer hit a 5-minute wall clock.
-- Live tool-call progress in the log. Pi's `tool_execution_start` events are surfaced at INFO level as `pi: <tool> <arg>` so long turns show what the agent is doing without enabling `--debug`.
-- First-run install: the bridge's Node dependencies install automatically on first use via `npm ci`, with an `.install-marker` that short-circuits subsequent runs. The install lands in a writable cache under `<FDR_HOME>/bridge/`, never in the (possibly read-only) installed-wheel `priv/pi-bridge/` directory.
-- `FDR_BRIDGE_DIR` env var to point at a local bridge checkout during development.
-- Unit test suite for the bridge client and installer (`tests/test_pi_bridge.py`, `tests/test_bridge_install.py`), plus an integration test (`tests/integration/test_bridge_end_to_end.py`) gated on Node.js availability and run via `pytest -m integration`.
+- Added pure-Python Antigravity runner (`AgyRunner`, `AgyClient`, `agy_policy`, `health`) that supervises `agy -p --output-format stream-json` with `--json-schema` enforcement, per-role `--settings` permission profiles, process-group reaping, and tool-aware stall detection. See [`docs/agy-runner.md`](docs/agy-runner.md).
+- Added reset-window-aware model ordering via `codexbar usage --provider antigravity --json --no-color`, ranking eligible models in each role's chain by earliest 5-hour quota reset (`resetsAt`) and persisting capacity cooldowns in `<FDR_HOME>/quota_state.json`.
+- Added `--preflight` (`FDR_PREFLIGHT`) and cached version/model preflight checks in `<FDR_HOME>/agy_state.json`.
+- Added single-instance per-repository lock (`<fdr_dir>/runner.lock`) with PID and start-time identity verification, plus rolling 24-hour call budgeting (`FDR_DAILY_MAX_CALLS`).
+- Added post-run git working-tree, staged-index, and `HEAD` invariant checks for `review`, `introspect`, `improve_prompts`, and `fix` turns.
+- Added `.agents/` workspace customizations (`AGENTS.md`, `rules/code-quality.md`, and skills `fdr-check`, `roadmap`, `technology-selection`, `decision-records`, and `writing-voice`).
 
 ### Changed
 
-- Pi invocation no longer uses the `pi` CLI subprocess. `PiRunner.run_pi` translates the historical argv (`-p`, `--tools`, `--model`, `@file`) into structured bridge commands. The `(returncode, stdout, stderr)` return contract is preserved so managers don't change.
-- `fix-die-repeat` commits to pi as the single backend. Multi-backend scaffolding (paused issues #16 / #17 / #20) is no longer on the roadmap — the sidecar bridge replaces the need for a separate backend-abstraction layer.
-- The `--model-skip` fallback on 503 capacity errors is no longer automatic. The bridge exposes `set_model` but has no fallback list; the 503 handler now logs a warning and retries with the same model. Users who relied on pi's model cycling can configure `FDR_MODEL` / `--model` explicitly.
-- CI workflow and `scripts/ci.sh` now set up Node.js 20 and run `npm ci` for the bridge before running Python tests.
+- Replaced `PiRunner` and all Pi CLI/SDK invocations with `AgyRunner` (`run_agent`, `run_agent_safe`, `run_agent_review`, `before_agent_call`, `run_preflight`).
+- Moved state-file writes (`review_current.md`, `.resolved_threads`, `.introspection_result.yaml`, and `introspection.yaml` status updates) from agent file tools to Python supervisor materialization of validated `result.structured_output` payloads.
 
 ### Removed
 
-- Direct pi CLI subprocess path in `PiRunner.run_pi`. See the [pi-bridge design note](docs/pi-bridge.md) for the replacement architecture.
-
-### Notes
-
-- Windows support for the sidecar bridge is **unverified**. Linux and macOS are exercised. PRs welcome.
-- Users who customized the bridge location can set `FDR_BRIDGE_DIR=/absolute/path`.
+- Removed the Node.js `priv/pi-bridge/` sidecar, `fix_die_repeat/pi_bridge.py`, `fix_die_repeat/bridge_install.py`, `docs/pi-bridge.md`, and all Node.js 20 runtime/CI dependencies.
+- Removed legacy `--test-model` / `FDR_TEST_MODEL` and `FDR_PI_*` settings in favor of `--preflight` / `FDR_PREFLIGHT`, `FDR_AGENT_*`, `FDR_MODELS_*`, and `FDR_QUOTA_*`.

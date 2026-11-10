@@ -17,7 +17,7 @@ from fix_die_repeat.detection import (
     resolve_check_cmd,
     validate_check_cmd_or_exit,
 )
-from fix_die_repeat.runner import PiRunner
+from fix_die_repeat.runner import AgyRunner
 from fix_die_repeat.runner_improve_prompts import ImprovePromptsManager
 from fix_die_repeat.utils import is_running_in_dev_mode
 
@@ -25,16 +25,20 @@ console = Console()
 
 
 _MAIN_HELP = (
-    "Automated check, review, and fix loop using pi.\n"
+    "Automated check, review, and fix loop using Antigravity (agy).\n"
     "\n"
     "\b\n"
     "Environment variables:\n"
-    "  FDR_CHECK_CMD, FDR_MAX_ITERS, FDR_MODEL, FDR_MAX_PR_THREADS,\n"
-    "  FDR_ARCHIVE_ARTIFACTS, FDR_COMPACT_ARTIFACTS,\n"
+    "  FDR_CHECK_CMD, FDR_MAX_ITERS, FDR_MODEL, FDR_AGY_BIN,\n"
+    "  FDR_MODELS_FIX, FDR_MODELS_REVIEW, FDR_MODELS_INTROSPECT, FDR_MODELS_IMPROVE,\n"
+    "  FDR_QUOTA_SOURCE (auto|codexbar|none), FDR_QUOTA_MAX_USED_PCT, FDR_QUOTA_MAX_WAIT_S,\n"
+    "  FDR_DAILY_MAX_CALLS (default: 50, 0=unlimited),\n"
+    "  FDR_AGENT_IDLE_TIMEOUT_S, FDR_AGENT_TOOL_TIMEOUT_S, FDR_AGENT_HARD_TIMEOUT_S,\n"
+    "  FDR_MAX_PR_THREADS, FDR_ARCHIVE_ARTIFACTS, FDR_COMPACT_ARTIFACTS,\n"
     "  FDR_PR_REVIEW, FDR_PR_REVIEW_INTROSPECT,\n"
     "  FDR_CONTEXTUAL_REVIEW, FDR_FULL_CODEBASE_REVIEW,\n"
     "  FDR_PR_THREADS_INTROSPECT_ONLY, FDR_IMPROVE_PROMPTS,\n"
-    "  FDR_TEST_MODEL, FDR_DEBUG, FDR_LANGUAGES,\n"
+    "  FDR_PREFLIGHT, FDR_DEBUG, FDR_LANGUAGES,\n"
     "  FDR_HOME (base directory for state; defaults to ~/.fix-die-repeat),\n"
     "  FDR_NTFY_ENABLED (default: 1),\n"
     "  FDR_NTFY_URL (default: http://localhost:2586)\n"
@@ -47,8 +51,8 @@ _MAIN_HELP = (
     "  # Use a custom check command\n"
     '  fix-die-repeat -c "make test"\n'
     "\b\n"
-    "  # Test a model before running\n"
-    "  fix-die-repeat --test-model anthropic/claude-sonnet-4-5\n"
+    "  # Verify agy CLI, model chains, and quota windows before running\n"
+    "  fix-die-repeat --preflight\n"
     "\b\n"
     "  # Enable PR review mode\n"
     "  fix-die-repeat --pr-review\n"
@@ -65,7 +69,7 @@ _MAIN_HELP = (
     "  # Fetch and introspect unresolved PR review threads, then exit\n"
     "  fix-die-repeat --pr-threads-introspect-only\n"
     "\b\n"
-    "  # Have pi update the user prompt templates from accumulated introspection data\n"
+    "  # Update user prompt templates from accumulated introspection data\n"
     "  fix-die-repeat --improve-prompts\n"
 )
 
@@ -87,7 +91,7 @@ _MAIN_HELP = (
 @click.option(
     "-m",
     "--model",
-    help="Override model selection (e.g., anthropic/claude-sonnet-4-5)",
+    help="Primary agy model ID prepended to role chains (e.g., claude-sonnet-5-5-high)",
     envvar="FDR_MODEL",
 )
 @click.option(
@@ -156,7 +160,7 @@ _MAIN_HELP = (
     "--improve-prompts",
     is_flag=True,
     help=(
-        "Read accumulated introspection data and have pi update the user-owned "
+        "Read accumulated introspection data and have agy update the user-owned "
         "prompt templates under <FDR_HOME>/templates/. Seeds copies of the shipped "
         "templates on first use; never mutates the package. Runs once and exits. "
         "Standalone mode — mutually exclusive with --contextual-review, "
@@ -165,9 +169,10 @@ _MAIN_HELP = (
     envvar="FDR_IMPROVE_PROMPTS",
 )
 @click.option(
-    "--test-model",
-    help="Test model compatibility before running (exits after test)",
-    envvar="FDR_TEST_MODEL",
+    "--preflight",
+    is_flag=True,
+    help="Run agy version, model inventory, quota snapshot, and smoke test, then exit",
+    envvar="FDR_PREFLIGHT",
 )
 @click.option(
     "-d",
@@ -178,42 +183,18 @@ _MAIN_HELP = (
 )
 @click.version_option()
 def main(**kwargs: str | int | bool | None) -> None:
-    """Run the automated check, review, and fix loop.
-
-    fix-die-repeat is an automated tool that:
-    1. Runs your check command (CI/tests)
-    2. If checks fail, uses pi to fix the errors
-    3. If checks pass, reviews the changes using pi
-    4. If review finds issues, fixes them
-    5. Repeats until all checks pass and no issues are found
-    """
+    """Run the automated check, review, and fix loop."""
     debug = bool(kwargs.get("debug", False))
     exit_code = _run_main_with_error_handling(kwargs, debug=debug)
     raise SystemExit(exit_code)
 
 
 def _build_cli_options(kwargs: dict[str, str | int | bool | None]) -> CliOptions:
-    """Build CliOptions from Click's keyword arguments.
-
-    Click passes each @click.option value as a keyword argument. This
-    function maps them into the CliOptions dataclass so downstream code
-    works with a typed object instead of a raw dict.
-
-    Click guarantees value types via each option's ``type=`` parameter,
-    so the casts below are safe.
-
-    Args:
-        kwargs: Keyword arguments injected by Click decorators
-
-    Returns:
-        CliOptions with CLI-provided overrides
-
-    """
+    """Build CliOptions from Click's keyword arguments."""
     check_cmd = kwargs.get("check_cmd")
     max_iters = kwargs.get("max_iters")
     model = kwargs.get("model")
     max_pr_threads = kwargs.get("max_pr_threads")
-    test_model = kwargs.get("test_model")
     archive_flag = kwargs.get("archive_artifacts")
 
     return CliOptions(
@@ -229,7 +210,7 @@ def _build_cli_options(kwargs: dict[str, str | int | bool | None]) -> CliOptions
         contextual_review=bool(kwargs.get("contextual_review", False)),
         pr_threads_introspect_only=bool(kwargs.get("pr_threads_introspect_only", False)),
         improve_prompts=bool(kwargs.get("improve_prompts", False)),
-        test_model=str(test_model) if test_model is not None else None,
+        preflight=bool(kwargs.get("preflight", False)),
         debug=bool(kwargs.get("debug", False)),
     )
 
@@ -239,16 +220,7 @@ def _run_main_with_error_handling(
     *,
     debug: bool,
 ) -> int:
-    """Run the main application with error handling.
-
-    Args:
-        kwargs: Keyword arguments injected by Click decorators
-        debug: Whether debug mode is enabled
-
-    Returns:
-        Exit code for the process
-
-    """
+    """Run the main application with error handling."""
     try:
         options = _build_cli_options(kwargs)
         return _run_main(options)
@@ -274,12 +246,7 @@ _STANDALONE_MODE_FLAGS: tuple[tuple[str, str], ...] = (
 
 
 def _validate_standalone_modes_mutually_exclusive(settings: object) -> None:
-    """Reject combinations of standalone-mode flags.
-
-    Each standalone mode runs a one-shot codepath and exits; combining
-    them would silently drop all but one. Raise ValueError so the user
-    sees an actionable error instead of surprising behavior.
-    """
+    """Reject combinations of standalone-mode flags."""
     active = [cli_flag for attr, cli_flag in _STANDALONE_MODE_FLAGS if getattr(settings, attr)]
     if len(active) > 1:
         joined = ", ".join(active)
@@ -291,31 +258,14 @@ def _validate_standalone_modes_mutually_exclusive(settings: object) -> None:
 
 
 def _run_main(options: CliOptions) -> int:
-    """Run main application logic using CliOptions.
-
-    Avoids Click's parameter explosion by accepting a grouped options
-    object instead of individual parameters.
-
-    Args:
-        options: CLI options grouped into a dataclass
-
-    Returns:
-        Exit code from PiRunner
-
-    """
-    # Show dev mode indicator if running from editable install
+    """Run main application logic using CliOptions."""
     if is_running_in_dev_mode():
         console.print("[cyan]⚡ Running in DEV mode (editable install)[/cyan]")
 
-    # Get settings
     settings = get_settings(options)
 
     _validate_standalone_modes_mutually_exclusive(settings)
 
-    # --improve-prompts is repo-agnostic: it reads <FDR_HOME>/introspection.yaml
-    # and edits <FDR_HOME>/templates/. When there's no pending work, exit before
-    # constructing Paths/PiRunner so we don't materialize <FDR_HOME>/repos/<slug>/
-    # as a side effect of a no-op run.
     if settings.improve_prompts and not ImprovePromptsManager.has_pending_work(
         logging.getLogger("fix-die-repeat.cli")
     ):
@@ -325,19 +275,17 @@ def _run_main(options: CliOptions) -> int:
         )
         return 0
 
-    # Initialize paths
     paths = Paths()
 
-    # Standalone modes don't run checks — skip check-cmd resolution entirely
     needs_check_cmd = not (
         settings.full_codebase_review
         or settings.pr_threads_introspect_only
         or settings.contextual_review
         or settings.improve_prompts
+        or settings.preflight
     )
 
     if needs_check_cmd:
-        # Resolve check command if not provided via CLI/env
         if settings.check_cmd is None:
             settings.check_cmd = resolve_check_cmd(
                 cli_check_cmd=options.check_cmd,
@@ -346,7 +294,6 @@ def _run_main(options: CliOptions) -> int:
                 project_root=str(paths.project_root),
             )
 
-        # Ensure we have a concrete check command before validation
         if settings.check_cmd is None:
             console.print(
                 "[red]Error:[/red] Unable to determine a check command to run.\n"
@@ -355,12 +302,9 @@ def _run_main(options: CliOptions) -> int:
             )
             raise SystemExit(1)
 
-        # Pre-flight validation of resolved check command
         validate_check_cmd_or_exit(settings.check_cmd)
 
-    # Create runner and run the loop. The context manager owns the pi-bridge
-    # subprocess lifecycle — it spawns node on __enter__ and shuts down on exit.
-    with PiRunner(settings, paths) as runner:
+    with AgyRunner(settings, paths) as runner:
         return runner.run()
 
 

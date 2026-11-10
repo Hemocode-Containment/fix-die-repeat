@@ -4,36 +4,57 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 import sys
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Self
 
-if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+import yaml
 
-from fix_die_repeat.bridge_install import ensure_bridge_installed
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Sequence
+    from types import TracebackType
+
+from fix_die_repeat.agy_client import (
+    AgyClient,
+    AgyTurnRequest,
+    AgyTurnResult,
+    capture_git_snapshot,
+    verify_fix_git_state,
+    verify_readonly_git_state,
+)
+from fix_die_repeat.agy_policy import (
+    ROLE_SCHEMAS,
+    AgentRole,
+    AgyPolicyError,
+    PermissionProfileContext,
+    QuotaStateStore,
+    RankedModelSelection,
+    RankingContext,
+    build_permission_settings,
+    ensure_agy_ready,
+    fetch_codexbar_snapshot,
+    is_quota_error,
+    rank_models_for_role,
+    resolve_role_chain,
+    validate_structured_payload,
+)
 from fix_die_repeat.config import (
     Paths,
     Settings,
+    get_user_templates_dir,
 )
 from fix_die_repeat.config import (
     get_introspection_file_path as _get_introspection_file_path,
 )
+from fix_die_repeat.health import RunnerLock
 from fix_die_repeat.lang import filter_supported_languages, resolve_languages
 from fix_die_repeat.messages import (
     git_checkout_instructions,
     git_diff_instructions,
-    model_recommendations_full,
     oscillation_warning,
-)
-from fix_die_repeat.pi_bridge import (
-    PiBridge,
-    PiBridgeConfig,
-    PiBridgeError,
-    PromptOverrides,
 )
 from fix_die_repeat.prompts import render_prompt
 from fix_die_repeat.runner_artifacts import ArtifactManager
@@ -58,72 +79,20 @@ from fix_die_repeat.utils import (
     send_ntfy_notification,
 )
 
-_ARGV_MISSING_VALUE = object()
-
-
-def _parse_pi_argv(
-    args: tuple[str, ...],
-) -> tuple[str, tuple[str, ...], str | None, tuple[str, ...]]:
-    """Translate a legacy pi CLI argv into bridge-shaped parameters.
-
-    Returns ``(message, tools, model, file_args)``:
-
-    * ``message`` — the final prompt text (last positional non-flag arg)
-    * ``tools`` — tuple of tool names parsed from ``--tools a,b,c`` (empty for default)
-    * ``model`` — value of ``--model X`` if present, else ``None``
-    * ``file_args`` — paths extracted from ``@path`` tokens (order preserved)
-
-    Raises :class:`ValueError` when a value-taking flag (``--tools``, ``--model``)
-    is at the end of argv or otherwise missing its value. The legacy pi CLI
-    fails fast in this case; silently returning empty values would route a
-    malformed command to the bridge and hide the user error.
-    """
-    tools: tuple[str, ...] = ()
-    model: str | None = None
-    file_args: list[str] = []
-    positional: list[str] = []
-
-    it = iter(args)
-    for arg in it:
-        if arg == "-p":
-            continue
-        if arg == "--tools":
-            value = next(it, _ARGV_MISSING_VALUE)
-            if value is _ARGV_MISSING_VALUE:
-                msg = "--tools requires a comma-separated tool list"
-                raise ValueError(msg)
-            tools = tuple(s.strip() for s in str(value).split(",") if s.strip())
-            continue
-        if arg == "--model":
-            value = next(it, _ARGV_MISSING_VALUE)
-            if value is _ARGV_MISSING_VALUE:
-                msg = "--model requires a 'provider/model-id' value"
-                raise ValueError(msg)
-            model = str(value)
-            continue
-        if arg.startswith("@"):
-            file_args.append(arg[1:])
-            continue
-        positional.append(arg)
-
-    message = positional[-1] if positional else ""
-    return (message, tools, model, tuple(file_args))
-
 
 def _embed_attached_files(
     message: str,
-    file_args: Iterable[str],
+    file_args: Iterable[str | Path],
     project_root: Path,
 ) -> str:
-    """Prepend ``@file`` contents to ``message`` for bridge prompts.
+    """Prepend attached file contents to ``message`` for ``agy`` prompts.
 
-    Pi CLI loaded these files into the initial prompt implicitly. The bridge
-    passes a single message string, so we inline the file contents with a
-    simple framing. Missing/unreadable files surface as an inline note so the
-    agent sees the failure instead of silently losing context.
+    Missing or unreadable files surface as an inline note so the agent sees
+    the failure instead of silently losing context.
     """
     chunks: list[str] = []
-    for ref in file_args:
+    for raw_ref in file_args:
+        ref = str(raw_ref).removeprefix("@")
         path = Path(ref)
         if not path.is_absolute():
             path = (project_root / ref).resolve()
@@ -146,34 +115,13 @@ def _safe_relative(path: Path, project_root: Path) -> str:
         return str(path)
 
 
-_TOOL_ARG_SUMMARY_MAX = 80
+class AgyRunner:
+    """Runner that orchestrates the fix-die-repeat loop using Antigravity (``agy``)."""
 
-
-def _summarize_tool_args(args: object) -> str:
-    """Render a compact single-line summary of a tool_execution_start args payload.
-
-    Pi emits tool args as a dict with tool-specific shape (``filePath`` for
-    read, ``command`` for bash, ``pattern`` for grep, etc.). We don't know the
-    shape ahead of time, so we pick the first string-valued field and truncate
-    it — good enough for a progress line, never large enough to dominate logs.
-    """
-    if not isinstance(args, dict):
-        return ""
-    for value in args.values():
-        if isinstance(value, str) and value:
-            collapsed = " ".join(value.split())
-            if len(collapsed) > _TOOL_ARG_SUMMARY_MAX:
-                return collapsed[: _TOOL_ARG_SUMMARY_MAX - 1] + "…"
-            return collapsed
-    return ""
-
-
-class PiRunner:
-    """Runner that orchestrates the fix-die-repeat loop."""
-
-    # Class-level default so tests that build runners via ``__new__`` (bypassing
-    # ``__init__``) can still reach ``self._bridge`` without AttributeError.
-    _bridge: PiBridge | None = None
+    _runner_lock: RunnerLock | None = None
+    _quota_store: QuotaStateStore | None = None
+    _client: AgyClient | None = None
+    _available_models: frozenset[str] = frozenset()
 
     def __init__(self, settings: Settings, paths: Paths) -> None:
         """Initialize the runner.
@@ -187,7 +135,7 @@ class PiRunner:
         self.paths = paths
         self.project_root = paths.project_root
         self.iteration = 0
-        self.pi_invocation_count = 0
+        self.agent_invocation_count = 0
         self.script_start_time: float = 0.0
         self.start_sha = ""
         self.pr_review_no_progress_count = 0
@@ -224,383 +172,592 @@ class PiRunner:
         )
         self.improve_prompts_manager = ImprovePromptsManager(self.settings, self.logger)
 
-        # Bridge lifecycle is deferred to __enter__ so that tests which build
-        # PiRunner without a context manager (or via __new__) don't trigger
-        # `npm ci` or subprocess spawning. Callers going through the CLI use
-        # ``with PiRunner(...) as runner:``.
-        self._bridge: PiBridge | None = None
+        self._runner_lock: RunnerLock | None = None
+        self._quota_store: QuotaStateStore | None = None
+        self._client: AgyClient | None = None
+        self._available_models: frozenset[str] = frozenset()
 
     def _get_artifact_manager(self) -> ArtifactManager | None:
         """Return the artifact manager when initialized."""
         manager = self.__dict__.get("artifact_manager")
-        if isinstance(manager, ArtifactManager):
-            return manager
-        return None
+        return manager if manager is not None else None
 
     def _get_review_manager(self) -> ReviewManager | None:
         """Return the review manager when initialized."""
         manager = self.__dict__.get("review_manager")
-        if isinstance(manager, ReviewManager):
-            return manager
-        return None
+        return manager if manager is not None else None
 
     def _get_pr_manager(self) -> PrReviewManager | None:
         """Return the PR review manager when initialized."""
         manager = self.__dict__.get("pr_manager")
-        if isinstance(manager, PrReviewManager):
-            return manager
-        return None
+        return manager if manager is not None else None
 
     def _get_introspection_manager(self) -> IntrospectionManager | None:
         """Return the introspection manager when initialized."""
         manager = self.__dict__.get("introspection_manager")
-        if isinstance(manager, IntrospectionManager):
-            return manager
-        return None
+        return manager if manager is not None else None
 
     def _get_improve_prompts_manager(self) -> ImprovePromptsManager | None:
         """Return the improve-prompts manager when initialized."""
         manager = self.__dict__.get("improve_prompts_manager")
-        if isinstance(manager, ImprovePromptsManager):
-            return manager
-        return None
+        return manager if manager is not None else None
 
     def __enter__(self) -> Self:
-        """Start the pi-bridge subprocess for this runner's lifetime."""
-        self._start_bridge()
+        """Acquire the per-repository runner lock and initialize the ``agy`` client."""
+        lock = RunnerLock(self.paths.runner_lock_file, logger=self.logger)
+        lock.__enter__()
+        self._runner_lock = lock
+        cd_min = self.settings.quota_cooldown_minutes
+        default_cooldown_s = float(cd_min) * 60.0 if cd_min is not None else None
+        self._quota_store = QuotaStateStore(
+            self.paths.quota_state_file,
+            default_cooldown_s=default_cooldown_s,
+        )
+        self._client = AgyClient(
+            executable=self.settings.agy_bin,
+            logger=self.logger,
+            runner_lock=lock,
+        )
         return self
 
     def __exit__(
         self,
-        exc_type: object,
-        exc: object,
-        tb: object,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
     ) -> None:
-        """Shut down the pi-bridge subprocess."""
-        self._stop_bridge()
+        """Release the per-repository runner lock."""
+        if self._runner_lock is not None:
+            try:
+                self._runner_lock.__exit__(exc_type, exc, tb)
+            finally:
+                self._runner_lock = None
+        self._client = None
 
-    def _start_bridge(self) -> None:
-        if self._bridge is not None:
-            return
+    def _get_quota_store(self) -> QuotaStateStore:
+        """Return or lazily construct the quota state store."""
+        store = self.__dict__.get("_quota_store")
+        if store is not None:
+            return store
+        quota_file = getattr(self.paths, "quota_state_file", None)
+        if not isinstance(quota_file, Path):
+            quota_file = self.paths.fdr_dir / "quota_state.json"
+        cd_min = getattr(self.settings, "quota_cooldown_minutes", None)
+        default_cooldown_s = float(cd_min) * 60.0 if isinstance(cd_min, (int, float)) else None
+        store = QuotaStateStore(quota_file, default_cooldown_s=default_cooldown_s)
+        self._quota_store = store
+        return store
+
+    def _get_client(self) -> AgyClient:
+        """Return or lazily construct the ``agy`` client."""
+        client = self.__dict__.get("_client")
+        if client is not None:
+            return client
+        agy_bin = getattr(self.settings, "agy_bin", "agy")
+        if not isinstance(agy_bin, str) or not agy_bin.strip():
+            agy_bin = "agy"
+        lock = self.__dict__.get("_runner_lock")
+        client = AgyClient(
+            executable=agy_bin,
+            logger=self.logger,
+            runner_lock=lock if isinstance(lock, RunnerLock) else None,
+        )
+        self._client = client
+        return client
+
+    def before_agent_call(self) -> None:
+        """Add optional delay between sequential ``agy`` calls."""
+        count = getattr(self, "agent_invocation_count", 0)
+        delay = getattr(self.settings, "agent_sequential_delay_seconds", 0)
+        if count > 0 and isinstance(delay, (int, float)) and delay > 0:
+            time.sleep(delay)
+        self.agent_invocation_count = count + 1
+
+    def _role_chain(self, role: AgentRole) -> tuple[str, ...]:
+        """Resolve the configured model chain for ``role``."""
+        primary = getattr(self.settings, "model", None)
+        primary_str = primary if isinstance(primary, str) else None
+        attr_map = {
+            AgentRole.FIX: "models_fix",
+            AgentRole.REVIEW: "models_review",
+            AgentRole.INTROSPECT: "models_introspect",
+            AgentRole.IMPROVE_PROMPTS: "models_improve_prompts",
+        }
+        raw_override = getattr(self.settings, attr_map[role], None)
+        chain_override = raw_override if isinstance(raw_override, str) else None
+        return resolve_role_chain(
+            role,
+            primary_override=primary_str,
+            role_chain_override=chain_override,
+        )
+
+    def _rank_models_for_role(self, role: AgentRole) -> RankedModelSelection:
+        """Rank the configured chain for ``role`` using cooldowns and ``codexbar``."""
+        chain = self._role_chain(role)
+        quota_source = getattr(self.settings, "quota_source", "auto")
+        source_str = quota_source if isinstance(quota_source, str) else "auto"
+        snapshot = fetch_codexbar_snapshot(quota_source=source_str, logger=self.logger)
+        max_used_raw = getattr(self.settings, "quota_max_used_pct", 95.0)
+        max_used = float(max_used_raw) if isinstance(max_used_raw, (int, float)) else 95.0
+        avail: frozenset[str] = getattr(self, "_available_models", frozenset())
+        context = RankingContext(
+            quota_state=self._get_quota_store(),
+            snapshot=snapshot,
+            available_models=avail if isinstance(avail, frozenset) else frozenset(),
+            max_used_pct=max_used,
+        )
+        return rank_models_for_role(chain, context)
+
+    def run_preflight(self) -> None:
+        """Verify ``agy`` binary, model inventory, and optional ``--preflight`` check."""
+        all_models: list[str] = []
+        for role in AgentRole:
+            for model in self._role_chain(role):
+                if model not in all_models:
+                    all_models.append(model)
+
         try:
-            bridge_script = ensure_bridge_installed(
-                self.paths.bridge_source_dir,
-                self.paths.bridge_runtime_dir,
-                logger=self.logger,
+            result = ensure_agy_ready(
+                agy_bin=self.settings.agy_bin,
+                state_file=self.paths.agy_state_file,
+                required_models=all_models,
+                force_smoke=bool(self.settings.preflight),
+                quota_source=self.settings.quota_source,
             )
-        except Exception as err:
-            self.logger.error("pi-bridge install failed: %s", err)
-            raise
+        except AgyPolicyError as err:
+            self.logger.error("Antigravity preflight failed: %s", err)
+            sys.exit(1)
 
-        try:
-            provider, model_id = self._split_settings_model(self.settings.model)
-        except ValueError as err:
-            self.logger.error("pi-bridge startup rejected model value: %s", err)
-            raise PiBridgeError(str(err)) from err
-        config = PiBridgeConfig(
-            provider=provider,
-            model=model_id,
-            working_dir=self.paths.project_root,
-            tools=("read", "bash", "edit", "write", "grep", "find", "ls"),
-        )
-        bridge = PiBridge(config, bridge_script=bridge_script, logger=self.logger)
-        # Only publish self._bridge after a successful __enter__. Otherwise a
-        # failed init would leave the guard in _start_bridge (``if self._bridge
-        # is not None: return``) pointing at a broken bridge, silently skipping
-        # every future restart attempt.
-        bridge.__enter__()
-        self._bridge = bridge
+        self._available_models = result.available_models
 
-    def _stop_bridge(self) -> None:
-        if self._bridge is None:
+        if not self.settings.preflight:
             return
-        try:
-            self._bridge.__exit__(None, None, None)
-        finally:
-            self._bridge = None
 
-    @staticmethod
-    def _split_settings_model(model: str | None) -> tuple[str | None, str | None]:
-        """Split a ``provider/model-id`` string; return (None, None) when unset.
-
-        The bridge protocol requires provider and model to travel together (or
-        both be absent so pi's SDK picks defaults). A bare model id would
-        otherwise be quietly routed as ``(None, model)`` and rejected at bridge
-        init with a cryptic ``init_missing_fields`` error — surface that as a
-        clear ValueError here instead.
-        """
-        if not model:
-            return (None, None)
-        if "/" in model:
-            provider, _, model_id = model.partition("/")
-            if provider and model_id:
-                return (provider, model_id)
-        msg = (
-            "Invalid model value. Use 'provider/model-id' format, for example "
-            "'anthropic/claude-sonnet-4-5'."
+        self.logger.info(
+            "Preflight OK: agy %s (%s) — %d models available.",
+            result.version,
+            result.executable,
+            len(result.available_models),
         )
-        raise ValueError(msg)
+        for role in AgentRole:
+            selection = self._rank_models_for_role(role)
+            self.logger.info(
+                "  role=%s ranked=%s skipped=%s",
+                role.value,
+                list(selection.eligible_models),
+                selection.skipped_reasons,
+            )
+        if result.quota_snapshot and result.quota_snapshot.windows:
+            for win in result.quota_snapshot.windows.values():
+                self.logger.info(
+                    "  quota %s (%s): %.1f%% used, resets %s",
+                    win.window_id,
+                    win.title,
+                    win.used_percent,
+                    win.resets_at_iso,
+                )
+        sys.exit(0)
 
-    def before_pi_call(self) -> None:
-        """Add delay between sequential pi calls to reduce lock contention."""
-        if self.pi_invocation_count > 0:
-            time.sleep(self.settings.pi_sequential_delay_seconds)
-        self.pi_invocation_count += 1
+    def run_agent_turn(
+        self,
+        role: AgentRole | str,
+        prompt: str,
+        *,
+        attachments: Sequence[str | Path] = (),
+        model: str | None = None,
+    ) -> AgyTurnResult:
+        """Execute a single ``agy`` turn with git verification and output materialization."""
+        self.before_agent_call()
+        role_enum = AgentRole(role)
+        chosen_model = model or self._role_chain(role_enum)[0]
+        quota_store = self._get_quota_store()
 
-    def run_pi(self, *args: str) -> tuple[int, str, str]:
-        """Run pi via the sidecar bridge, preserving the legacy argv API.
-
-        Translates the historical ``run_pi("-p", "--tools", "read,edit,...",
-        "@file", prompt)`` shape into a bridge ``prompt`` command. Returns
-        ``(returncode, stdout, stderr)`` with the same semantics as the old
-        subprocess path so call sites don't need to change. Argv/model
-        validation errors become ``(1, "", <msg>)`` rather than propagating —
-        the legacy pi subprocess would have exited non-zero in the same cases.
-        """
-        self.before_pi_call()
-        cmd_args = ["pi", *args]  # for logging fidelity
-
+        max_calls_raw = getattr(self.settings, "daily_max_calls", 0)
+        max_calls = max_calls_raw if isinstance(max_calls_raw, int) else 0
         try:
-            message, tools_override, model_override, file_args = _parse_pi_argv(args)
-        except ValueError as err:
-            self.logger.error("pi invocation rejected: %s", err)
-            result = (1, "", str(err))
-            self._log_pi_invocation(cmd_args, result)
-            return result
+            quota_store.reserve_daily_call(chosen_model, max_calls)
+        except AgyPolicyError as err:
+            self.logger.error("%s", err)
+            cap_res = AgyTurnResult(
+                returncode=1,
+                response_text="",
+                stderr=str(err),
+                model=chosen_model,
+            )
+            self._log_agent_invocation(role_enum, chosen_model, cap_res)
+            return cap_res
 
-        if message.strip().startswith("/"):
-            return self._handle_pi_slash_command(message.strip(), cmd_args)
+        full_prompt = _embed_attached_files(prompt, attachments, self.paths.project_root)
+        fdr_home = get_user_templates_dir().parent
+        perm_ctx = PermissionProfileContext(
+            project_root=self.paths.project_root,
+            fdr_dir=self.paths.fdr_dir,
+            fdr_home=fdr_home,
+            check_cmd=getattr(self.settings, "check_cmd", "") or "",
+        )
+        settings_obj = build_permission_settings(role_enum, perm_ctx)
+        add_dirs = (
+            (fdr_home, fdr_home / "templates")
+            if role_enum == AgentRole.IMPROVE_PROMPTS
+            else (self.paths.fdr_dir,)
+        )
 
-        full_message = _embed_attached_files(message, file_args, self.paths.project_root)
-        try:
-            overrides = self._build_prompt_overrides(tools_override, model_override)
-        except ValueError as err:
-            self.logger.error("pi invocation rejected: %s", err)
-            result = (1, "", str(err))
-            self._log_pi_invocation(cmd_args, result)
-            return result
+        transcript_dir = getattr(self.paths, "agy_transcripts_dir", None)
+        transcript_path: Path | None = None
+        if isinstance(transcript_dir, Path):
+            call_num = getattr(self, "agent_invocation_count", 1)
+            iter_num = getattr(self, "iteration", 0)
+            transcript_path = (
+                transcript_dir / f"iter{iter_num}_call{call_num}_{role_enum.value}.jsonl"
+            )
 
-        result = self._invoke_bridge_prompt(full_message, overrides)
-        self._log_pi_invocation(cmd_args, result)
+        request = AgyTurnRequest(
+            role=role_enum,
+            prompt=full_prompt,
+            model=chosen_model,
+            schema=ROLE_SCHEMAS[role_enum],
+            settings=settings_obj,
+            working_dir=self.paths.project_root,
+            add_dirs=add_dirs,
+            transcript_path=transcript_path,
+            idle_timeout_s=self._timeout_setting("agent_idle_timeout_s", 120.0),
+            tool_timeout_s=self._timeout_setting("agent_tool_timeout_s", 1200.0),
+            hard_timeout_s=self._timeout_setting("agent_hard_timeout_s", 3600.0),
+        )
+
+        before_git = capture_git_snapshot(self.paths.project_root)
+        result = self._get_client().run_turn(request)
+
+        if result.returncode == 0 and not self._verify_turn_git_state(role_enum, before_git):
+            result = replace(
+                result,
+                returncode=1,
+                structured_output=None,
+                stderr="Post-run git invariant verification failed.",
+            )
+
+        if result.returncode == 0:
+            result = self._materialize_role_output(role_enum, result)
+
+        self._log_agent_invocation(role_enum, chosen_model, result)
         return result
 
-    def _build_prompt_overrides(
-        self,
-        tools_override: tuple[str, ...],
-        model_override: str | None,
-    ) -> PromptOverrides | None:
-        """Translate argv-parsed overrides into a :class:`PromptOverrides`.
+    def _timeout_setting(self, attr_name: str, default: float) -> float:
+        raw = getattr(self.settings, attr_name, default)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and raw > 0:
+            return float(raw)
+        return default
 
-        ``model_override`` uses per-prompt semantics (mirrors legacy
-        ``pi -p --model X``) — it applies to this single call only and does
-        not mutate the bridge's configured default. Raises :class:`ValueError`
-        if ``model_override`` is present but not a valid ``provider/model-id``
-        pair; callers in :meth:`run_pi` translate that into the legacy
-        ``(1, "", msg)`` result tuple.
-        """
-        tools = list(tools_override) if tools_override else None
-        provider: str | None = None
-        model_id: str | None = None
-        if model_override is not None:
-            provider, model_id = self._split_settings_model(model_override)
-        if tools is None and provider is None and model_id is None:
-            return None
-        return PromptOverrides(tools=tools, provider=provider, model=model_id)
-
-    def _invoke_bridge_prompt(
-        self,
-        message: str,
-        overrides: PromptOverrides | None,
-    ) -> tuple[int, str, str]:
-        """Send ``message`` to the bridge and return the legacy result tuple."""
-        if self._bridge is None:
-            self.logger.error(
-                "pi-bridge is not running; use `with PiRunner(...) as runner:` "
-                "to manage its lifecycle",
+    def _verify_turn_git_state(self, role: AgentRole, before_git: object) -> bool:
+        """Verify git working-tree, index, and ``HEAD`` invariants after a turn."""
+        if not hasattr(before_git, "is_git_repo"):
+            return True
+        if role in (AgentRole.REVIEW, AgentRole.INTROSPECT, AgentRole.IMPROVE_PROMPTS):
+            return verify_readonly_git_state(
+                self.paths.project_root,
+                before_git,  # type: ignore[arg-type]
+                self.logger,
             )
-            return (1, "", "pi-bridge not running")
-        try:
-            return self._bridge.prompt(
-                message,
-                idle_timeout_s=self.settings.pi_prompt_idle_timeout_s,
-                hard_timeout_s=self.settings.pi_prompt_hard_timeout_s,
-                overrides=overrides,
-                on_event=self._log_bridge_event,
-            )
-        except PiBridgeError as err:
-            self.logger.error("pi-bridge prompt raised: %s", err)
-            return (1, "", str(err))
-
-    def _log_bridge_event(self, event: dict[str, object]) -> None:
-        """Log a one-liner per tool call so long pi turns are visible live.
-
-        text_delta / thinking_delta fire every few tokens and would drown the
-        log; tool_execution_start is the rarer, more useful cadence — it
-        corresponds to actions a user can picture ("pi: read runner.py").
-        """
-        if event.get("type") != "tool_execution_start":
-            return
-        tool_name = str(event.get("toolName", "?"))
-        args = event.get("args")
-        summary = _summarize_tool_args(args)
-        if summary:
-            self.logger.info("pi: %s %s", tool_name, summary)
-        else:
-            self.logger.info("pi: %s", tool_name)
-
-    def _log_pi_invocation(self, cmd_args: list[str], result: tuple[int, str, str]) -> None:
-        """Append a one-call audit trail to ``paths.pi_log`` and log failures."""
-        returncode, stdout, stderr = result
-        if self.paths.pi_log:
-            with self.paths.pi_log.open("a", encoding="utf-8") as f:
-                f.write(f"Command: {shlex.join(cmd_args)}\n")
-                f.write(f"Exit code: {returncode}\n")
-                if stdout:
-                    f.write(f"STDOUT:\n{stdout}\n")
-                if stderr:
-                    f.write(f"STDERR:\n{stderr}\n")
-                f.write("\n")
-        if returncode != 0:
-            self.logger.error("pi exited with code %s", returncode)
-            if self.paths.pi_log:
-                self.logger.error("pi output logged to: %s", self.paths.pi_log)
-
-    def _handle_pi_slash_command(self, message: str, cmd_args: list[str]) -> tuple[int, str, str]:
-        """Handle legacy pi slash commands that don't translate to the bridge.
-
-        ``/model-skip`` and similar internals were pi CLI conveniences; the
-        bridge has no equivalent without explicit fallback-list configuration.
-        Log a warning and succeed so ``run_pi_safe``'s surrounding retry logic
-        doesn't cascade into false failures.
-        """
-        self.logger.warning(
-            "pi slash-command %s has no bridge equivalent; skipping (was: %s)",
-            message,
-            shlex.join(cmd_args),
+        return verify_fix_git_state(
+            self.paths.project_root,
+            before_git,  # type: ignore[arg-type]
+            self.logger,
         )
-        if self.paths.pi_log:
-            with self.paths.pi_log.open("a", encoding="utf-8") as f:
-                f.write(f"Command: {shlex.join(cmd_args)}\n")
-                f.write("Exit code: 0 (slash-command skipped: no bridge equivalent)\n\n")
-        return (0, "", "")
 
-    def run_pi_safe(self, *args: str) -> tuple[int, str, str]:
-        """Run pi via the bridge with a single retry on failure.
+    def _materialize_review_output(
+        self,
+        result: AgyTurnResult,
+        structured: dict[str, object],
+    ) -> AgyTurnResult:
+        verdict = str(structured.get("verdict") or "").strip()
+        issues_md = str(structured.get("issues_markdown") or "").strip()
+        if verdict == "ISSUES":
+            if not issues_md or issues_md == "NO_ISSUES":
+                err_msg = (
+                    "Review verdict 'ISSUES' requires non-empty issues_markdown "
+                    "distinct from 'NO_ISSUES'."
+                )
+                self.logger.error(err_msg)
+                return replace(
+                    result,
+                    returncode=1,
+                    structured_output=None,
+                    stderr=err_msg,
+                )
+            self.paths.review_current_file.write_text(f"{issues_md}\n", encoding="utf-8")
+        else:
+            self.paths.review_current_file.write_text("NO_ISSUES", encoding="utf-8")
+        return result
 
-        The legacy 503 fallback (pi CLI's ``/model-skip``) is no longer
-        automatic — the bridge exposes ``set_model`` but has no fallback list.
-        The 429 fallback still truncates local artifact files before retry,
-        which was the useful part of ``emergency_compact`` anyway.
-        """
-        returncode, stdout, stderr = self.run_pi(*args)
+    def _materialize_introspect_output(
+        self,
+        result: AgyTurnResult,
+        structured: dict[str, object],
+    ) -> AgyTurnResult:
+        yaml_text = yaml.safe_dump(structured, default_flow_style=False, sort_keys=False)
+        self.paths.introspection_result_file.write_text(yaml_text, encoding="utf-8")
+        return result
 
-        if returncode == 0:
-            return (returncode, stdout, stderr)
+    def _materialize_fix_output(
+        self,
+        result: AgyTurnResult,
+        structured: dict[str, object],
+    ) -> AgyTurnResult:
+        resolved_ids = structured.get("resolved_thread_ids")
+        if isinstance(resolved_ids, list):
+            clean_ids = [
+                str(tid).strip()
+                for tid in resolved_ids
+                if isinstance(tid, str) and str(tid).strip()
+            ]
+            if clean_ids:
+                self.paths.pr_resolved_threads_file.write_text(
+                    "\n".join(clean_ids) + "\n",
+                    encoding="utf-8",
+                )
+            else:
+                self.paths.pr_resolved_threads_file.unlink(missing_ok=True)
+        return result
 
-        # Detect capacity error (503) — log only; no automatic model switch in bridge mode.
-        if self.paths.pi_log and self.paths.pi_log.exists():
-            content = self.paths.pi_log.read_text()
-            if "503" in content or "No capacity" in content:
-                self.logger.warning(
-                    "Detected model capacity error (503). "
-                    "The bridge has no automatic model-skip; retrying with the same model.",
+    def _materialize_improve_prompts_output(
+        self,
+        result: AgyTurnResult,
+        structured: dict[str, object],
+    ) -> AgyTurnResult:
+        raw_reviewed_ids = structured.get("reviewed_thread_ids")
+        reviewed_ids = (
+            {
+                str(tid).strip()
+                for tid in raw_reviewed_ids
+                if isinstance(tid, str) and str(tid).strip()
+            }
+            if isinstance(raw_reviewed_ids, list)
+            else set()
+        )
+        self._mark_introspection_entries_reviewed(reviewed_ids)
+        summary = str(structured.get("summary") or "").strip()
+        if summary and "<IMPROVE_PROMPTS_SUMMARY>" not in result.response_text:
+            wrapped = f"<IMPROVE_PROMPTS_SUMMARY>\n{summary}\n</IMPROVE_PROMPTS_SUMMARY>\n"
+            return replace(result, response_text=wrapped)
+        return result
+
+    def _materialize_role_output(
+        self,
+        role: AgentRole,
+        result: AgyTurnResult,
+    ) -> AgyTurnResult:
+        """Write supervisor-verified ``structured_output`` to ``<FDR_HOME>`` files."""
+        structured = result.structured_output
+        schema = ROLE_SCHEMAS.get(role)
+        if schema is not None:
+            err = validate_structured_payload(structured, schema)
+            if err:
+                self.logger.error(
+                    "Turn structured output failed schema validation for role '%s': %s",
+                    role.value,
+                    err,
+                )
+                return replace(
+                    result,
+                    returncode=1,
+                    structured_output=None,
+                    stderr=f"Structured output schema validation failed: {err}",
                 )
 
-        # Detect long context error (429) — still shrink our local artifacts.
-        if self.paths.pi_log and self.paths.pi_log.exists():
-            content = self.paths.pi_log.read_text()
-            if "429" in content.lower() and "long context" in content.lower():
+        if not isinstance(structured, dict):
+            return result
+
+        dispatch = {
+            AgentRole.REVIEW: self._materialize_review_output,
+            AgentRole.INTROSPECT: self._materialize_introspect_output,
+            AgentRole.FIX: self._materialize_fix_output,
+            AgentRole.IMPROVE_PROMPTS: self._materialize_improve_prompts_output,
+        }
+        handler = dispatch.get(role)
+        if handler is not None:
+            return handler(result, structured)
+        return result
+
+    @staticmethod
+    def _mark_introspection_entries_reviewed(reviewed_ids: set[str]) -> None:
+        """Transition ``status: pending`` entries in ``introspection.yaml`` to ``reviewed``."""
+        if not reviewed_ids:
+            return
+        introspection_file = _get_introspection_file_path(create=False)
+        if not introspection_file.exists():
+            return
+        try:
+            content = introspection_file.read_text(encoding="utf-8")
+            docs = list(yaml.safe_load_all(content))
+        except (OSError, yaml.YAMLError):
+            return
+        changed = False
+        updated_docs: list[dict[str, object]] = []
+        for doc in docs:
+            if isinstance(doc, dict):
+                entry = doc
+                if entry.get("status") == "pending":
+                    threads = entry.get("threads")
+                    doc_thread_ids = (
+                        {
+                            str(t.get("id")).strip()
+                            for t in threads
+                            if isinstance(t, dict) and t.get("id")
+                        }
+                        if isinstance(threads, list)
+                        else set()
+                    )
+                    if doc_thread_ids and doc_thread_ids.issubset(reviewed_ids):
+                        entry = {**entry, "status": "reviewed"}
+                        changed = True
+                updated_docs.append(entry)
+        if changed:
+            rendered = "\n---\n".join(
+                yaml.safe_dump(doc, default_flow_style=False, sort_keys=False).strip()
+                for doc in updated_docs
+            )
+            introspection_file.write_text(f"{rendered}\n", encoding="utf-8")
+
+    def run_agent(
+        self,
+        role: AgentRole | str,
+        prompt: str,
+        *,
+        attachments: Sequence[str | Path] = (),
+        model: str | None = None,
+    ) -> tuple[int, str, str]:
+        """Run a single ``agy`` turn and return ``(returncode, response_text, stderr)``."""
+        result = self.run_agent_turn(
+            role,
+            prompt,
+            attachments=attachments,
+            model=model,
+        )
+        return (result.returncode, result.response_text, result.stderr)
+
+    def run_agent_safe(
+        self,
+        role: AgentRole | str,
+        prompt: str,
+        *,
+        attachments: Sequence[str | Path] = (),
+    ) -> tuple[int, str, str]:
+        """Run ``agy`` across the ranked model chain with quota fallback and single retry."""
+        role_enum = AgentRole(role)
+        selection = self._rank_models_for_role(role_enum)
+        models_to_try = selection.eligible_models
+
+        if not models_to_try and selection.earliest_reset_epoch is not None:
+            max_wait_raw = getattr(self.settings, "quota_max_wait_s", 0)
+            max_wait = max_wait_raw if isinstance(max_wait_raw, int) else 0
+            wait_s = max(0.0, selection.earliest_reset_epoch - time.time())
+            if 0 < wait_s <= max_wait:
+                self.logger.info(
+                    "All models for role '%s' in quota cooldown; sleeping %.0fs until reset...",
+                    role_enum.value,
+                    wait_s,
+                )
+                time.sleep(wait_s)
+                selection = self._rank_models_for_role(role_enum)
+                models_to_try = selection.eligible_models
+
+        if not models_to_try:
+            reasons_summary = (
+                ", ".join(f"{m}: {r}" for m, r in selection.skipped_reasons.items())
+                or "no eligible models configured"
+            )
+            msg = (
+                f"All models for role '{role_enum.value}' are currently cooling down "
+                f"or exhausted ({reasons_summary})."
+            )
+            self.logger.warning(msg)
+            return (1, "", msg)
+
+        quota_store = self._get_quota_store()
+        last_tuple: tuple[int, str, str] = (1, "", "No models configured")
+
+        for candidate_model in models_to_try:
+            returncode, stdout, stderr = self.run_agent(
+                role_enum,
+                prompt,
+                attachments=attachments,
+                model=candidate_model,
+            )
+            last_tuple = (returncode, stdout, stderr)
+            if returncode == 0:
+                quota_store.clear_cooldown(candidate_model)
+                return last_tuple
+
+            combined_err = f"{stderr}\n{self._read_agy_log_tail()}"
+            if "429" in combined_err.lower() and "long context" in combined_err.lower():
                 self.logger.info(
                     "Detected long context rate limit (429). Forcing emergency compaction...",
                 )
                 self.emergency_compact()
                 self.logger.info("Emergency compaction complete. Retrying...")
 
-        self.logger.info("pi failed (exit %s). Retrying once...", returncode)
-        return self.run_pi(*args)
-
-    def test_model(self) -> None:
-        """Test model compatibility before running full loop."""
-        if not self.settings.test_model:
-            self.logger.info("No --test-model specified, skipping test.")
-            return
-
-        test_file = self.paths.fdr_dir / ".model_test_result.txt"
-
-        self.logger.info(
-            "===== Testing model compatibility: %s =====",
-            self.settings.test_model,
-        )
-        self.logger.info("Running simple write test to verify model can use pi's tools...")
-
-        # Route through the bridge so --test-model exercises the same code path
-        # as real runs; direct `pi` subprocess invocation would reintroduce a
-        # hard dependency on the pi CLI and bypass bridge tool-event plumbing.
-        returncode, _stdout, _stderr = self.run_pi(
-            "-p",
-            "--model",
-            self.settings.test_model,
-            (
-                f"Write 'MODEL TEST OK' to file {test_file}. "
-                "Do NOT use any other tools or generate pseudo-code."
-            ),
-        )
-
-        if returncode != 0:
-            self.logger.error("pi test invocation failed with code %s", returncode)
-            self.logger.error(
-                "Model %s failed basic invocation test.",
-                self.settings.test_model,
-            )
-            test_file.unlink(missing_ok=True)
-            sys.exit(1)
-
-        # Check if model wrote the expected output
-        if test_file.exists() and "MODEL TEST OK" in test_file.read_text():
-            self.logger.info("Model %s PASSED tool test.", self.settings.test_model)
-            self.logger.info("Test output: %s", test_file.read_text().strip())
-            test_file.unlink(missing_ok=True)
-
-            self.logger.info("Model is compatible for code editing. Ready to proceed.")
-            self.logger.info("")
-            self.logger.info(
-                "To run with this model: fix-die-repeat --model %s",
-                self.settings.test_model,
-            )
-            self.logger.info(
-                "Or set via env var: export FDR_MODEL=%s",
-                self.settings.test_model,
-            )
-            sys.exit(0)
-        else:
-            test_output = test_file.read_text() if test_file.exists() else "(empty)"
-            self.logger.info("Model %s FAILED tool test.", self.settings.test_model)
-            self.logger.info("Test output: %s", test_output)
-
-            # Check for pseudo-code
-            if re.search(
-                r"print|IO\.puts|System\.cmd|File\.write|defmodule",
-                test_output,
-                re.IGNORECASE,
-            ):
+            if is_quota_error(combined_err):
+                quota_store.record_quota_cooldown(candidate_model, reason=combined_err)
                 self.logger.warning(
-                    "WARNING: Model generated pseudo-code instead of using pi's tools.",
+                    "Model %s hit quota/capacity limit; advancing to next model in '%s' chain.",
+                    candidate_model,
+                    role_enum.value,
                 )
-                self.logger.warning(
-                    "This model appears incompatible with pi's tool-calling interface.",
-                )
-
-            test_file.unlink(missing_ok=True)
+                continue
 
             self.logger.info(
-                "Model %s is NOT suitable for code editing tasks.",
-                self.settings.test_model,
+                "agy failed (exit %s) on %s. Retrying once...",
+                returncode,
+                candidate_model,
             )
-            self.logger.info("")
-            self.logger.info(model_recommendations_full())
-            self.logger.info("")
-            self.logger.info("To override: fix-die-repeat --model <model>")
-            sys.exit(1)
+            return self.run_agent(
+                role_enum,
+                prompt,
+                attachments=attachments,
+                model=candidate_model,
+            )
+
+        return last_tuple
+
+    def _read_agy_log_tail(self) -> str:
+        log_path = getattr(self.paths, "agy_log", None)
+        if isinstance(log_path, Path) and log_path.exists():
+            try:
+                return log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+            except OSError:
+                return ""
+        return ""
+
+    def _log_agent_invocation(
+        self,
+        role: AgentRole,
+        model: str,
+        result: AgyTurnResult,
+    ) -> None:
+        """Append a one-call audit trail to ``paths.agy_log`` and log failures."""
+        log_path = getattr(self.paths, "agy_log", None)
+        if isinstance(log_path, Path):
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(f"Role: {role.value} | Model: {model}\n")
+                f.write(f"Exit code: {result.returncode}\n")
+                if result.usage.total_tokens:
+                    f.write(
+                        f"Tokens: input={result.usage.input_tokens} "
+                        f"output={result.usage.output_tokens} "
+                        f"thinking={result.usage.thinking_tokens} "
+                        f"total={result.usage.total_tokens}\n"
+                    )
+                if result.response_text:
+                    f.write(f"STDOUT:\n{result.response_text}\n")
+                if result.stderr:
+                    f.write(f"STDERR:\n{result.stderr}\n")
+                if result.structured_output is not None:
+                    f.write(f"STRUCTURED_OUTPUT:\n{json.dumps(result.structured_output)}\n")
+                f.write("\n")
+        if result.returncode != 0:
+            self.logger.error("agy exited with code %s (model=%s)", result.returncode, model)
+            if isinstance(log_path, Path):
+                self.logger.error("agy output logged to: %s", log_path)
 
     def run_checks(self) -> tuple[int, str]:
         """Run the check command.
@@ -612,7 +769,7 @@ class PiRunner:
         check_cmd = self.settings.check_cmd
         if check_cmd is None:
             msg = (
-                "Settings.check_cmd is None. This likely indicates PiRunner was "
+                "Settings.check_cmd is None. This likely indicates AgyRunner was "
                 "constructed or used without running the CLI validation that sets "
                 "a check command."
             )
@@ -648,12 +805,14 @@ class PiRunner:
             archive_dir = self.paths.fdr_dir / "archive" / archive_timestamp
             self.logger.info("Archiving existing artifacts to %s", archive_dir)
             archive_dir.mkdir(parents=True, exist_ok=True)
+            lock_name = self.paths.runner_lock_file.name
+            excluded_lock_files = {lock_name, f"{lock_name}.lck"}
             for file_path in self.paths.fdr_dir.glob("*"):
-                if file_path.is_file():
+                if file_path.is_file() and file_path.name not in excluded_lock_files:
                     file_path.rename(archive_dir / file_path.name)
 
         # Initialize logs
-        self.paths.pi_log.write_text("")
+        self.paths.agy_log.write_text("")
         self.session_log.write_text("")
         self.paths.checks_hash_file.write_text("")
 
@@ -674,8 +833,8 @@ class PiRunner:
             self.paths.start_sha_file.write_text(self.start_sha)
             self.logger.info("Git checkpoint: %s", self.start_sha)
 
-        # Test model if requested
-        self.test_model()
+        # Verify agy CLI and models (and exit early if --preflight was passed)
+        self.run_preflight()
 
         # Compact large artifacts from previous runs
         self.check_and_compact_artifacts()
@@ -698,18 +857,18 @@ class PiRunner:
             large_file_warning: Warning message for large files
 
         Returns:
-            Exit code from pi command
+            Exit code from agy command
 
         """
         # Check for oscillation (delegates to artifact_manager)
         artifact_manager = self._get_artifact_manager()
         if artifact_manager:
-            oscillation_warning = artifact_manager.check_oscillation(self.iteration)
+            oscillation_warn = artifact_manager.check_oscillation(self.iteration)
         else:
-            oscillation_warning = self.check_oscillation()
+            oscillation_warn = self.check_oscillation()
 
         self.logger.info(
-            "[Step 2A] Checks failed (fix attempt %s/%s). Running pi to fix errors...",
+            "[Step 2A] Checks failed (fix attempt %s/%s). Running agy to fix errors...",
             fix_attempt,
             self.settings.max_iters,
         )
@@ -720,19 +879,18 @@ class PiRunner:
         else:
             self.filter_checks_log()
 
-        # Build pi command
-        pi_args = ["-p", "--tools", "read,edit,write,bash,grep,find,ls"]
-        pi_args.append(f"@{self.paths.checks_filtered_log}")
+        # Build attachments list
+        attachments: list[str] = [str(self.paths.checks_filtered_log)]
 
         # Add historical context
         if self.paths.review_file.exists():
-            pi_args.append(f"@{self.paths.review_file}")
+            attachments.append(str(self.paths.review_file))
         if self.paths.build_history_file.exists():
-            pi_args.append(f"@{self.paths.build_history_file}")
+            attachments.append(str(self.paths.build_history_file))
 
         # Attach changed files in push mode
         if context_mode == "push":
-            pi_args.extend(f"@{filepath}" for filepath in changed_files)
+            attachments.extend(changed_files)
 
         # Detect languages for language-specific checks
         languages = resolve_languages(changed_files, self.settings.languages)
@@ -741,7 +899,7 @@ class PiRunner:
         prompt = render_prompt(
             "fix_checks.j2",
             check_cmd=self.settings.check_cmd,
-            oscillation_warning=oscillation_warning,
+            oscillation_warning=oscillation_warn,
             include_review_history=self.paths.review_file.exists(),
             include_build_history=self.paths.build_history_file.exists(),
             context_mode=context_mode,
@@ -751,11 +909,15 @@ class PiRunner:
             **self.paths.template_context(),
         )
 
-        self.logger.info("Running pi to fix errors (attempt %s)...", fix_attempt)
-        pi_returncode, _, _ = self.run_pi_safe(*pi_args, prompt)
+        self.logger.info("Running agy to fix errors (attempt %s)...", fix_attempt)
+        agy_returncode, _, _ = self.run_agent_safe(
+            AgentRole.FIX,
+            prompt,
+            attachments=attachments,
+        )
 
-        if pi_returncode != 0:
-            self.logger.info("pi could not produce a fix on attempt %s.", fix_attempt)
+        if agy_returncode != 0:
+            self.logger.info("agy could not produce a fix on attempt %s.", fix_attempt)
 
         # Check if changes were made
         _git_returncode, stdout, _ = run_command(
@@ -765,8 +927,8 @@ class PiRunner:
         )
         if not stdout.strip():
             self.logger.error(
-                "Pi reported success but NO files were modified. This suggests "
-                "'edit' commands failed (e.g., text not found).",
+                "agy reported success but NO files were modified. This suggests "
+                "edit operations failed or no fix was applied.",
             )
             with self.paths.build_history_file.open("a") as f:
                 f.write(
@@ -784,7 +946,7 @@ class PiRunner:
                 f.write(f"## Iteration {self.iteration} fix attempt {fix_attempt}\n")
                 f.write(f"{stat_output}\n\n")
 
-        return pi_returncode
+        return agy_returncode
 
     def prepare_fix_context(self) -> tuple[list[str], str, str, str]:
         """Prepare context for fix attempts.
@@ -915,7 +1077,11 @@ class PiRunner:
             or not self.paths.review_current_file.read_text()
         ):
             # Skip local review if we have PR threads to process
-            self.review_manager.run_local_review(self.iteration, self.start_sha, self.run_pi_safe)
+            self.review_manager.run_local_review(
+                self.iteration,
+                self.start_sha,
+                self.run_agent_safe,
+            )
         else:
             self.logger.info(
                 "[Step 4] Using PR threads from %s for review.",
@@ -987,7 +1153,7 @@ class PiRunner:
         """Run a single report-only full-codebase review pass.
 
         This mode never attempts fixes, so looping is pointless — any second
-        pass would re-discover the same issues. Runs pi exactly once over the
+        pass would re-discover the same issues. Runs agy exactly once over the
         whole tracked codebase, overwrites review.md with the findings, and
         prints them to the terminal so the user can see them directly.
 
@@ -1000,15 +1166,14 @@ class PiRunner:
         self.artifact_manager.check_and_compact_artifacts()
 
         self.paths.review_current_file.unlink(missing_ok=True)
-        self.review_manager.run_full_codebase_review(self.iteration, self.run_pi_safe)
+        self.review_manager.run_full_codebase_review(self.iteration, self.run_agent_safe)
 
         if not self.paths.review_current_file.exists():
             self.logger.error(
-                "%s was not created by pi. Treating as no issues.",
+                "Full-codebase review failed; %s was not created by agy.",
                 self.paths.review_current_file,
             )
-            self.paths.review_current_file.write_text("NO_ISSUES")
-            self.paths.review_file.write_text("NO_ISSUES\n")
+            return 1
 
         review_content = (
             self.paths.review_file.read_text() if self.paths.review_file.exists() else ""
@@ -1053,7 +1218,7 @@ class PiRunner:
         """Run a single report-only contextual review pass.
 
         Auto-scopes to uncommitted changes, branch diff, or full codebase.
-        Never attempts fixes — runs pi exactly once over the scoped files,
+        Never attempts fixes — runs agy exactly once over the scoped files,
         overwrites review.md with the findings, and prints them to the
         terminal.
 
@@ -1066,15 +1231,14 @@ class PiRunner:
         self.artifact_manager.check_and_compact_artifacts()
 
         self.paths.review_current_file.unlink(missing_ok=True)
-        self.review_manager.run_contextual_review(self.iteration, self.run_pi_safe)
+        self.review_manager.run_contextual_review(self.iteration, self.run_agent_safe)
 
         if not self.paths.review_current_file.exists():
             self.logger.error(
-                "%s was not created by pi. Treating as no issues.",
+                "Contextual review failed; %s was not created by agy.",
                 self.paths.review_current_file,
             )
-            self.paths.review_current_file.write_text("NO_ISSUES")
-            self.paths.review_file.write_text("NO_ISSUES\n")
+            return 1
 
         review_content = (
             self.paths.review_file.read_text() if self.paths.review_file.exists() else ""
@@ -1158,7 +1322,10 @@ class PiRunner:
 
         try:
             introspection_manager.run_introspection(
-                self.iteration, "", self.run_pi_safe, introspect_only=True
+                self.iteration,
+                "",
+                self.run_agent_safe,
+                introspect_only=True,
             )
         except Exception:
             self.logger.exception("Introspection failed")
@@ -1170,7 +1337,7 @@ class PiRunner:
         """Run the prompt-improvement mode once and exit.
 
         Reads ``<FDR_HOME>/introspection.yaml``, seeds user template copies
-        under ``<FDR_HOME>/templates/`` if missing, and asks pi to update
+        under ``<FDR_HOME>/templates/`` if missing, and asks agy to update
         them based on pending introspection entries. Does not run checks,
         review, or the fix loop.
 
@@ -1185,7 +1352,7 @@ class PiRunner:
                 "Improve-prompts manager not initialized; cannot run --improve-prompts.",
             )
             return 1
-        return manager.run_improve_prompts(self.run_pi_safe)
+        return manager.run_improve_prompts(self.run_agent_safe)
 
     def _fetch_unresolved_pr_threads(
         self, pr_manager: PrReviewManager
@@ -1236,16 +1403,12 @@ class PiRunner:
         # Ensure resolved file is empty so all threads register as not-attempted.
         self.paths.cumulative_resolved_threads_file.write_text("")
 
-    # Delegation methods for backward compatibility with tests
-    # These methods forward to the appropriate manager classes
-
     def emergency_compact(self) -> None:
         """Force emergency truncation of artifacts."""
         artifact_manager = self._get_artifact_manager()
         if artifact_manager:
             artifact_manager.emergency_compact()
         else:
-            # Fallback for tests that create PiRunner via __new__
             for f in [self.paths.review_file, self.paths.build_history_file]:
                 if f.exists():
                     lines = f.read_text().splitlines()[-100:]
@@ -1261,7 +1424,6 @@ class PiRunner:
         artifact_manager = self._get_artifact_manager()
         if artifact_manager:
             return artifact_manager.check_compaction_needed()
-        # Fallback for tests
         needs_compact = False
         needs_emergency = False
 
@@ -1282,7 +1444,6 @@ class PiRunner:
         if artifact_manager:
             artifact_manager.perform_emergency_compaction()
         else:
-            # Fallback for tests
             self.logger.info(
                 "Emergency: artifacts exceed %s lines. Truncating to last 100 lines...",
                 self.settings.emergency_threshold_lines,
@@ -1298,9 +1459,8 @@ class PiRunner:
         if artifact_manager:
             artifact_manager.perform_regular_compaction()
         else:
-            # Fallback for tests
             self.logger.info(
-                "Artifacts exceed %s lines. Compacting with pi...",
+                "Artifacts exceed %s lines. Compacting artifacts...",
                 self.settings.compact_threshold_lines,
             )
 
@@ -1322,7 +1482,6 @@ class PiRunner:
         artifact_manager = self._get_artifact_manager()
         if artifact_manager:
             return artifact_manager.check_oscillation(self.iteration)
-        # Fallback for tests
         current_hash = get_git_revision_hash(self.paths.checks_log)
 
         if self.paths.checks_hash_file.exists():
@@ -1336,12 +1495,10 @@ class PiRunner:
                         prev_iter,
                     )
                     warning = oscillation_warning(prev_iter)
-                    # Record this hash
                     with self.paths.checks_hash_file.open("a") as f:
                         f.write(f"{current_hash}:{self.iteration}\n")
                     return warning
 
-        # Record this hash
         with self.paths.checks_hash_file.open("a") as f:
             f.write(f"{current_hash}:{self.iteration}\n")
 
@@ -1357,7 +1514,6 @@ class PiRunner:
         artifact_manager = self._get_artifact_manager()
         if artifact_manager:
             return artifact_manager.check_and_compact_artifacts()
-        # Fallback for tests
         if not self.settings.compact_artifacts:
             return False
 
@@ -1379,7 +1535,6 @@ class PiRunner:
         if artifact_manager:
             artifact_manager.filter_checks_log()
         else:
-            # Fallback for tests with basic filtering
             if not self.paths.checks_log.exists():
                 return
 
@@ -1418,11 +1573,9 @@ class PiRunner:
                             filtered_lines.append(lines[j])
                             seen_indices.add(j)
 
-            # Add tail
             filtered_lines.extend(["", f"--- Last {tail_lines} lines ---"])
             filtered_lines.extend(lines[-tail_lines:])
 
-            # Limit to 200 error lines + tail
             if len(filtered_lines) > max_lines:
                 filtered_lines = filtered_lines[: max_lines - tail_lines] + lines[-tail_lines:]
 
@@ -1438,7 +1591,6 @@ class PiRunner:
         review_manager = self._get_review_manager()
         if review_manager:
             return review_manager.generate_diff(self.start_sha)
-        # Fallback for tests
         diff_content = ""
         if self.start_sha:
             _returncode, diff_output, _ = run_command(
@@ -1467,7 +1619,6 @@ class PiRunner:
         review_manager = self._get_review_manager()
         if review_manager:
             return review_manager.add_untracked_files_diff(diff_content)
-        # Fallback for tests
         returncode, new_files, _ = run_command(
             "git ls-files --others --exclude-standard",
             cwd=self.paths.project_root,
@@ -1496,7 +1647,6 @@ class PiRunner:
         review_manager = self._get_review_manager()
         if review_manager:
             return review_manager.create_pseudo_diff(filepath)
-        # Fallback for tests
         file_path = self.paths.project_root / filepath
         pseudo_diff = (
             f"diff --git a/{filepath} b/{filepath}\n"
@@ -1531,14 +1681,11 @@ class PiRunner:
         review_manager = self._get_review_manager()
         if review_manager:
             return review_manager.has_no_review_issues(review_content)
-        # Fallback for tests
         stripped = review_content.strip()
 
-        # Explicit marker for no issues
         if stripped == "NO_ISSUES":
             return True
 
-        # Empty file — treat as no issues but warn (ambiguous state)
         if not stripped:
             self.logger.warning(
                 "review_current.md is empty — expected 'NO_ISSUES' marker. "
@@ -1546,9 +1693,7 @@ class PiRunner:
             )
             return True
 
-        # Legacy fallback for LLMs that ignored the instruction
         if "no critical issues found" in stripped.lower():
-            # Count actual content lines (excluding headers and empty lines)
             content_lines = [
                 line for line in review_content.splitlines() if line and not line.startswith("#")
             ]
@@ -1577,7 +1722,6 @@ class PiRunner:
         if pr_manager:
             return pr_manager.fetch_pr_threads_gql(repo_owner, repo_name, pr_number)
 
-        # Fallback for tests when pr_manager is not initialized
         query = """
             query($owner: String!, $repo: String!, $number: Int!) {
                 repository(owner: $owner, name: $repo) {
@@ -1802,7 +1946,6 @@ class PiRunner:
         pr_manager = self._get_pr_manager()
         if pr_manager:
             return pr_manager.get_branch_name()
-        # Fallback for tests
         returncode, branch, _ = run_command(
             "git branch --show-current",
             cwd=self.paths.project_root,
@@ -1832,7 +1975,6 @@ class PiRunner:
                     "repo_name": pr_info.repo_name,
                 }
             return None
-        # Fallback for tests
         returncode, pr_json, _ = run_command(
             f"gh pr view {branch} --json number,url,headRepository,headRepositoryOwner",
             cwd=self.paths.project_root,
@@ -1861,7 +2003,6 @@ class PiRunner:
         pr_manager = self._get_pr_manager()
         if pr_manager:
             return pr_manager.check_pr_threads_cache(cache_key)
-        # Fallback for tests
         has_valid_cache = (
             self.paths.pr_threads_cache.exists()
             and self.paths.pr_threads_hash_file.exists()
@@ -1906,7 +2047,9 @@ class PiRunner:
                 return
             try:
                 introspection_manager.run_introspection(
-                    self.iteration, self.start_sha, self.run_pi_safe
+                    self.iteration,
+                    self.start_sha,
+                    self.run_agent_safe,
                 )
             except Exception:
                 self.logger.exception(
@@ -1955,7 +2098,6 @@ class PiRunner:
             f.write(f"### Iteration {self.iteration} - Resolution ({timestamp})\n")
             f.write("- No issues found.\n\n")
 
-        # Done!
         self.paths.review_current_file.unlink(missing_ok=True)
         self.paths.start_sha_file.unlink(missing_ok=True)
 
@@ -1970,7 +2112,6 @@ class PiRunner:
 
         play_completion_sound()
 
-        # Send notification
         if self.settings.ntfy_enabled:
             send_ntfy_notification(
                 exit_code=0,
@@ -1994,23 +2135,18 @@ class PiRunner:
 
         """
         self.logger.info(
-            "[Step 6A] Pi fix attempt %s of %s...",
+            "[Step 6A] agy fix attempt %s of %s...",
             fix_attempt,
             max_fix_attempts,
         )
 
-        pi_args = ["-p", "--tools", "read,edit,write,bash,grep,find,ls"]
-
-        if self.settings.model:
-            pi_args.extend(["--model", self.settings.model])
-
-        pi_args.append(f"@{self.paths.review_current_file}")
+        attachments: list[str] = [str(self.paths.review_current_file)]
 
         # Attach recent history
         if self.paths.review_file.exists():
             lines = self.paths.review_file.read_text().splitlines()[-50:]
             self.paths.review_recent_file.write_text("\n".join(lines))
-            pi_args.append(f"@{self.paths.review_recent_file}")
+            attachments.append(str(self.paths.review_recent_file))
 
         # Build fix prompt
         fix_prompt = render_prompt(
@@ -2018,10 +2154,14 @@ class PiRunner:
             **self.paths.template_context(),
         )
 
-        returncode, _, _ = self.run_pi_safe(*pi_args, fix_prompt)
+        returncode, _, _ = self.run_agent_safe(
+            AgentRole.FIX,
+            fix_prompt,
+            attachments=attachments,
+        )
 
         if returncode != 0:
-            self.logger.info("pi fix failed on attempt %s.", fix_attempt)
+            self.logger.info("agy fix failed on attempt %s.", fix_attempt)
 
         # Record resolution attempt
         timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -2041,8 +2181,8 @@ class PiRunner:
         if not stdout.strip():
             self.consecutive_toolless_attempts += 1
             self.logger.error(
-                "Pi reported success on attempt %s but NO files were modified. "
-                "This suggests 'edit' commands failed (e.g., text not found).",
+                "agy reported success on attempt %s but NO files were modified. "
+                "This suggests edit operations failed or no changes were applied.",
                 fix_attempt,
             )
             with self.paths.build_history_file.open("a") as f:
@@ -2078,12 +2218,11 @@ class PiRunner:
 
         if not self.paths.review_current_file.exists():
             self.logger.error(
-                "%s was not created by pi. This is unexpected.",
+                "%s was not created by agy. This is unexpected.",
                 self.paths.review_current_file,
             )
             sys.exit(1)
 
-        # Check if file is empty or only contains "no issues" messages
         review_content = self.paths.review_current_file.read_text()
 
         if self.review_manager.has_no_review_issues(review_content):
@@ -2091,13 +2230,12 @@ class PiRunner:
                 "[Step 6B] No issues found in %s.",
                 self.paths.review_current_file,
             )
-            # Set a flag to call complete_success after the loop
             self._success_complete = True
             return
 
         # Issues found - fix them
         self.logger.info(
-            "[Step 6A] Issues found in %s. Running pi to fix them...",
+            "[Step 6A] Issues found in %s. Running agy to fix them...",
             self.paths.review_current_file,
         )
 
@@ -2114,11 +2252,6 @@ class PiRunner:
             else:
                 fix_attempt += 1
 
-        # Continue to next iteration
-
-    # Additional delegation methods for backward compatibility with tests
-    # These methods forward to the appropriate manager classes
-
     def format_pr_threads(self, threads: list, pr_number: int, pr_url: str) -> str:
         """Format PR threads for display.
 
@@ -2134,7 +2267,6 @@ class PiRunner:
         pr_manager = self._get_pr_manager()
         if pr_manager:
             return pr_manager.format_pr_threads(threads, pr_number, pr_url)
-        # Fallback for tests - basic formatting
         threads_output = [
             f"# PR Review Threads for #{pr_number} ({pr_url})",
             f"Unresolved threads: {len(threads)}",
@@ -2162,7 +2294,6 @@ class PiRunner:
             pr_manager.resolve_pr_threads()
             return
 
-        # Fallback for tests when pr_manager is not initialized
         if not self.paths.pr_resolved_threads_file.exists():
             self.logger.info("No threads were reported as resolved. Continuing to next iteration.")
             return
@@ -2176,7 +2307,6 @@ class PiRunner:
 
         self.logger.info("Model reported %s resolved thread(s).", len(resolved_ids))
 
-        # Verify all resolved IDs were in scope
         in_scope_ids = []
         if self.paths.pr_thread_ids_file.exists():
             in_scope_ids = self.paths.pr_thread_ids_file.read_text().strip().split("\n")
@@ -2192,7 +2322,6 @@ class PiRunner:
             )
 
         if safe_resolved_ids:
-            # Build GraphQL mutation to resolve a single review thread
             mutation = """
                 mutation($threadId: ID!) {
                     resolveReviewThread(input: {threadId: $threadId}) {
@@ -2206,7 +2335,6 @@ class PiRunner:
                 line.strip() for line in mutation.splitlines() if line.strip()
             )
 
-            # Resolve each thread individually (GitHub API limitation)
             resolved_count = 0
             for thread_id in safe_resolved_ids:
                 self.logger.info(
@@ -2240,11 +2368,9 @@ class PiRunner:
                 resolved_count,
                 len(safe_resolved_ids),
             )
-            # Invalidate cache and refetch
             self.paths.pr_threads_hash_file.unlink(missing_ok=True)
             self.fetch_pr_threads()
 
-            # Check if all threads were resolved (empty review_current after refetch)
             if (
                 not self.paths.review_current_file.exists()
                 or not self.paths.review_current_file.read_text().strip()
@@ -2258,7 +2384,6 @@ class PiRunner:
                 "No in-scope threads were reported as resolved. Continuing to next iteration.",
             )
 
-        # Clear resolved threads file
         self.paths.pr_resolved_threads_file.unlink(missing_ok=True)
 
     def append_review_entry(self, iteration: int) -> None:
@@ -2272,7 +2397,6 @@ class PiRunner:
         if review_manager:
             review_manager.append_review_entry(iteration)
         else:
-            # Fallback for tests with basic functionality
             timestamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             with self.paths.review_file.open("a") as f:
                 f.write(f"## Iteration {iteration} - Review ({timestamp})\n")
@@ -2282,15 +2406,15 @@ class PiRunner:
                 ):
                     f.write(self.paths.review_current_file.read_text())
                 else:
-                    f.write("_No issues found._\n")
+                    f.write("_Review failed or no output was produced._\n")
                 f.write("\n")
 
-    def build_review_prompt(self, diff_size: int, pi_args: list[str]) -> str:
+    def build_review_prompt(self, diff_size: int, attachments: list[Path]) -> str:
         """Build review prompt based on diff size.
 
         Args:
             diff_size: Size of the diff in bytes
-            pi_args: List to append diff file to if within threshold
+            attachments: List to append diff file path to if within threshold
 
         Returns:
             Review prompt prefix
@@ -2298,53 +2422,50 @@ class PiRunner:
         """
         review_manager = self._get_review_manager()
         if review_manager:
-            return review_manager.build_review_prompt(diff_size, pi_args)
-        # Fallback for tests
+            return review_manager.build_review_prompt(diff_size, attachments)
         if diff_size > self.settings.auto_attach_threshold:
             return (
                 f"The changes are too large to attach automatically ({diff_size} bytes). "
-                f"You MUST use the 'read' tool to inspect '{self.paths.diff_file}'.\n"
+                f"You MUST use the 'read_file' tool to inspect '{self.paths.diff_file}'.\n"
             )
         if diff_size == 0:
             return (
                 "No diff is available for this review (the diff could not be computed or "
                 "is empty), and no changed-file list is attached in this review mode. "
-                "Do not assume any changes are available to inspect. Write exactly "
+                "Do not assume any changes are available to inspect. Return verdict "
                 "NO_ISSUES.\n"
             )
-        pi_args.append(f"@{self.paths.diff_file}")
+        attachments.append(self.paths.diff_file)
         return (
             f"I have attached '{self.paths.diff_file}' which contains the changes "
             "made in this session.\n"
         )
 
-    def run_pi_review(
+    def run_agent_review(
         self,
         diff_size: int,
-        run_pi_callback: Callable[..., tuple[int, str, str]],
+        run_agent_callback: Callable[..., tuple[int, str, str]],
     ) -> None:
-        """Run pi to review changes.
+        """Run agy to review changes.
 
         Args:
             diff_size: Size of the diff in bytes
-            run_pi_callback: Function to run pi (from PiRunner)
+            run_agent_callback: Function to run agy (from AgyRunner)
 
         """
         review_manager = self._get_review_manager()
         if review_manager:
-            review_manager.run_pi_review(diff_size, run_pi_callback)
+            review_manager.run_agent_review(diff_size, run_agent_callback)
             return
 
-        # Fallback for tests when review_manager is not initialized
-        self.logger.info("[Step 5] Running pi to review files...")
+        self.logger.info("[Step 5] Running agy to review files...")
 
-        pi_args = ["-p", "--tools", "read,write,grep,find,ls"]
-        review_prompt_prefix = self.build_review_prompt(diff_size, pi_args)
+        attachments: list[Path] = []
+        review_prompt_prefix = self.build_review_prompt(diff_size, attachments)
 
         if self.paths.review_file.exists():
-            pi_args.append(f"@{self.paths.review_file}")
+            attachments.append(self.paths.review_file)
 
-        # Detect languages for language-specific checks
         changed_files = get_changed_files(self.paths.project_root)
         languages = resolve_languages(changed_files, self.settings.languages)
         languages = filter_supported_languages(languages)
@@ -2356,11 +2477,15 @@ class PiRunner:
             **self.paths.template_context(),
         )
 
-        returncode, _, _ = run_pi_callback(*pi_args, review_prompt)
+        returncode, _, _ = run_agent_callback(
+            AgentRole.REVIEW,
+            review_prompt,
+            attachments=attachments,
+        )
 
         if returncode != 0:
-            self.logger.info("pi review failed. Treating as no issues found.")
-            self.paths.review_current_file.write_text("NO_ISSUES")
+            self.logger.error("agy review failed with exit code %s.", returncode)
+            self.paths.review_current_file.unlink(missing_ok=True)
 
     def collect_introspection_data(
         self,
@@ -2380,7 +2505,6 @@ class PiRunner:
         if not introspection_manager:
             return
 
-        # If pr_info not provided, try to get it
         if pr_info is None:
             branch = self.get_branch_name()
             if branch is None:
@@ -2399,25 +2523,19 @@ class PiRunner:
         self,
         _iteration: int | None = None,
         _start_sha: str | None = None,
-        _run_pi_callback: Callable[..., tuple[int, str, str]] | None = None,
+        _run_agent_callback: Callable[..., tuple[int, str, str]] | None = None,
     ) -> None:
         """Run prompt introspection analysis.
 
-        This is a compatibility wrapper for tests. In normal operation,
-        introspection runs via _run_post_run_introspection which has access
-        to current iteration, start_sha, and run_pi_safe.
-
         Args:
-            iteration: Current iteration number (not used, for test compatibility)
-            start_sha: Starting git commit SHA (not used, for test compatibility)
-            run_pi_callback: Function to run pi (not used, for test compatibility)
+            _iteration: Current iteration number (unused)
+            _start_sha: Starting git commit SHA (unused)
+            _run_agent_callback: Function to run agy (unused)
 
         """
-        # Parameters accepted for test compatibility but not used
-        # _run_post_run_introspection uses self.iteration, self.start_sha, self.run_pi_safe
         self._run_post_run_introspection()
 
 
 def get_introspection_file_path() -> Path:
-    """Compatibility shim for tests expecting this helper on runner."""
+    """Return the global introspection YAML path."""
     return _get_introspection_file_path()

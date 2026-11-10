@@ -3,7 +3,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from fix_die_repeat.runner import PiRunner
+from fix_die_repeat.runner import AgyRunner
 from tests.conftest import FAKE_TEMPLATE_CONTEXT
 
 TEST_ITERATION = 1
@@ -27,14 +27,14 @@ class TestRunFixAttemptThreadFixes:
         paths.review_file = tmp_path / "review.md"
         paths.build_history_file = tmp_path / "build_history.md"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.iteration = TEST_ITERATION
         runner.logger = MagicMock()
         runner.check_oscillation = MagicMock(return_value=None)  # type: ignore[method-assign]
         runner.filter_checks_log = MagicMock()  # type: ignore[method-assign]
-        runner.run_pi_safe = MagicMock(  # type: ignore[method-assign]
+        runner.run_agent_safe = MagicMock(  # type: ignore[method-assign]
             return_value=(TEST_PI_FAILURE_EXIT_CODE, "", ""),
         )
 
@@ -68,7 +68,7 @@ class TestUntrackedDiffThreadFixes:
         paths.template_context.return_value = FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -91,7 +91,7 @@ class TestUntrackedDiffThreadFixes:
         paths.template_context.return_value = FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -121,7 +121,7 @@ class TestFetchPrThreadsGraphqlThreadFixes:
         paths.template_context.return_value = FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -169,7 +169,7 @@ class TestPrThreadScopePersistenceFixes:
         )
         paths.pr_thread_ids_file.write_text("thread1\n")
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -196,7 +196,7 @@ class TestPrThreadScopePersistenceFixes:
         paths.pr_threads_hash_file.write_text("owner/repo/1")
         paths.pr_threads_cache.write_text("--- Thread #1 ---\nID: thread1\n")
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -220,7 +220,7 @@ class TestPrThreadContentParsingFixes:
         paths.template_context.return_value = FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -270,7 +270,7 @@ class TestFetchPrThreadsLimitFixes:
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
         paths.pr_thread_ids_file = tmp_path / "pr_thread_ids"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -358,7 +358,7 @@ class TestFetchPrThreadsLimitFixes:
         paths.pr_threads_hash_file = tmp_path / "pr_threads_hash"
         paths.pr_thread_ids_file = tmp_path / "pr_thread_ids"
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -420,7 +420,7 @@ class TestFetchPrThreadsLimitFixes:
         paths.review_current_file.write_text("old content")
         paths.pr_thread_ids_file.write_text("thread1\n")
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -460,7 +460,7 @@ class TestRepoContextCwdThreadFixes:
         paths.template_context.return_value = FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -482,7 +482,7 @@ class TestRepoContextCwdThreadFixes:
         paths.template_context.return_value = FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
 
@@ -515,7 +515,7 @@ class TestRepoContextCwdThreadFixes:
         paths.template_context.return_value = FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.logger = MagicMock()
@@ -540,7 +540,7 @@ class TestRepoContextCwdThreadFixes:
         paths.template_context.return_value = FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.start_sha = "abc123"
@@ -566,7 +566,7 @@ class TestRepoContextCwdThreadFixes:
         paths.template_context.return_value = FAKE_TEMPLATE_CONTEXT
         paths.project_root = tmp_path
 
-        runner = PiRunner.__new__(PiRunner)
+        runner = AgyRunner.__new__(AgyRunner)
         runner.settings = settings
         runner.paths = paths
         runner.start_sha = ""

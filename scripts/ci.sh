@@ -13,6 +13,14 @@ if [[ "${1:-}" == "--check-only" ]]; then
     CHECK_ONLY=true
 fi
 
+# Ensure local repository uses version-controlled git hooks (.githooks)
+if [ -d ".githooks" ] && command -v git &> /dev/null && git rev-parse --is-inside-work-tree &> /dev/null; then
+    CURRENT_HOOKS_PATH="$(git config --get core.hooksPath 2>/dev/null || true)"
+    if [ "$CURRENT_HOOKS_PATH" != ".githooks" ]; then
+        git config core.hooksPath .githooks 2>/dev/null || true
+    fi
+fi
+
 # Use uv run to execute tools from the project's virtual environment
 if command -v uv &> /dev/null; then
     RUFF="uv run ruff"
@@ -35,20 +43,6 @@ fi
 # This enforces the NEVER-IGNORE policy
 echo "🛡️  Validating ruff rule ignore policy..."
 $VALIDATE_SCRIPT
-
-# Preflight: sync the pi-bridge Node dependencies with the lockfile. The sidecar
-# bridge at priv/pi-bridge/ is required for any real `fix-die-repeat` run and
-# for the integration test suite. Always running `npm ci` (rather than skipping
-# when node_modules is present) keeps local runs reproducible and aligned with
-# CI — a package.json/lockfile change otherwise silently leaves a stale tree.
-if [[ -d "priv/pi-bridge" ]]; then
-    if command -v npm &> /dev/null; then
-        echo "📦 Syncing pi-bridge Node dependencies with npm ci..."
-        (cd priv/pi-bridge && npm ci)
-    else
-        echo "⚠️  npm not found on PATH; skipping pi-bridge install (bridge tests will be limited)."
-    fi
-fi
 
 if [[ "$CHECK_ONLY" == "true" ]]; then
     echo "🔍 Running ruff linting (check-only mode)..."

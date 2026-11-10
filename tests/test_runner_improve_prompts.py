@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from fix_die_repeat.agy_policy import AgentRole
 from fix_die_repeat.config import (
     Settings,
     get_introspection_archive_file_path,
@@ -29,13 +30,13 @@ PI_FAILURE_EXIT_CODE = 3
 
 
 class _PiSpy:
-    """Captures pi invocations so tests can assert on arguments."""
+    """Captures agent invocations so tests can assert on arguments."""
 
     def __init__(self, returncode: int = 0) -> None:
         self.returncode = returncode
-        self.calls: list[tuple[str, ...]] = []
+        self.calls: list[tuple[object, ...]] = []
 
-    def __call__(self, *args: str) -> tuple[int, str, str]:
+    def __call__(self, *args: object, **_kwargs: object) -> tuple[int, str, str]:
         self.calls.append(args)
         return (self.returncode, "", "")
 
@@ -159,7 +160,7 @@ class TestSeedingAndPiInvocation:
             assert (templates_dir / name).exists()
 
     def test_invokes_pi_with_read_write_edit_tools(self) -> None:
-        """The pi call uses the expected tool allow-list and carries the rendered prompt."""
+        """The agent call uses AgentRole.IMPROVE_PROMPTS and carries the rendered prompt."""
         _write_introspection(
             "date: '2026-04-01'\nstatus: pending\npr_number: 1\npr_url: https://example.com/pr/1\n"
             "project: demo\nthreads: []\n",
@@ -171,10 +172,9 @@ class TestSeedingAndPiInvocation:
 
         assert len(spy.calls) == 1
         args = spy.calls[0]
-        assert args[0] == "-p"
-        assert args[1] == "--tools"
-        assert args[2] == "read,write,edit"
-        prompt = args[3]
+        assert args[0] == AgentRole.IMPROVE_PROMPTS
+        prompt = args[1]
+        assert isinstance(prompt, str)
         # Rendered prompt should reference the introspection file and every editable template
         assert str(get_introspection_file_path()) in prompt
         for name in EDITABLE_TEMPLATES:
@@ -242,7 +242,7 @@ class TestFileLockHeldDuringPi:
         monkeypatch.setattr(_FileLock, "__enter__", spy_enter)
         monkeypatch.setattr(_FileLock, "__exit__", spy_exit)
 
-        def pi_spy(*_args: str) -> tuple[int, str, str]:
+        def pi_spy(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             events.append("pi")
             return (0, "", "")
 
@@ -268,7 +268,7 @@ class TestValidationAndRollback:
         path = _write_introspection(self._PENDING_ENTRY)
         original = path.read_text()
 
-        def corrupting_pi(*_args: str) -> tuple[int, str, str]:
+        def corrupting_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             path.write_text(": : : bad yaml : : :")
             return (0, "", "")
 
@@ -286,7 +286,7 @@ class TestValidationAndRollback:
             "pr_url: https://example.com/pr/1\nproject: demo\nthreads: []\n"
         )
 
-        def well_behaved_pi(*_args: str) -> tuple[int, str, str]:
+        def well_behaved_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             path.write_text(new_content)
             return (0, "", "")
 
@@ -308,7 +308,7 @@ class TestValidationAndRollback:
         archive.write_text(archive_original)
         main_original = path.read_text()
 
-        def archive_corrupting_pi(*_args: str) -> tuple[int, str, str]:
+        def archive_corrupting_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             # pi leaves main file valid but archive malformed.
             path.write_text(self._PENDING_ENTRY.replace("pending", "reviewed"))
             archive.write_text(": : : bad yaml : : :")
@@ -326,7 +326,7 @@ class TestValidationAndRollback:
         path = _write_introspection(self._PENDING_ENTRY)
         original = path.read_text()
 
-        def deleting_pi(*_args: str) -> tuple[int, str, str]:
+        def deleting_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             path.unlink()
             return (0, "", "")
 
@@ -348,7 +348,7 @@ class TestValidationAndRollback:
         archive.write_text(archive_original)
         main_original = path.read_text()
 
-        def archive_deleting_pi(*_args: str) -> tuple[int, str, str]:
+        def archive_deleting_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             path.write_text(self._PENDING_ENTRY.replace("pending", "reviewed"))
             archive.unlink()
             return (0, "", "")
@@ -366,7 +366,22 @@ class TestValidationAndRollback:
         _write_introspection(self._PENDING_ENTRY)
 
         manager = _manager()
-        manager.run_improve_prompts(lambda *_a: (0, "", ""))
+        manager.run_improve_prompts(lambda *_a, **_k: (0, "", ""))
+
+    def test_rolls_back_when_template_has_invalid_jinja_syntax(self) -> None:
+        """If agent writes invalid Jinja2 syntax to a user template, roll back."""
+        _write_introspection(self._PENDING_ENTRY)
+        templates_dir = get_user_templates_dir()
+
+        def bad_jinja_agent(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
+            (templates_dir / "fix_checks.j2").write_text("{% if unclosed %}")
+            return (0, "", "")
+
+        manager = _manager()
+        rc = manager.run_improve_prompts(bad_jinja_agent)
+
+        assert rc != 0
+        assert "{% if unclosed %}" not in (templates_dir / "fix_checks.j2").read_text()
 
         fdr_home = Path(os.environ["FDR_HOME"])
         assert not list(fdr_home.rglob("*.bak"))
@@ -375,7 +390,7 @@ class TestValidationAndRollback:
         """Rollback path must also clean up .bak files."""
         path = _write_introspection(self._PENDING_ENTRY)
 
-        def corrupting_pi(*_args: str) -> tuple[int, str, str]:
+        def corrupting_pi(*_args: object, **_kwargs: object) -> tuple[int, str, str]:
             path.write_text(": : : bad yaml : : :")
             return (0, "", "")
 

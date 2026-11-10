@@ -1,2 +1,3 @@
-If you find [CRITICAL] issues, use the 'write' tool to save them to '{{ review_current_path }}'.
-If you find NO [CRITICAL] issues, use the 'write' tool to write ONLY the text "NO_ISSUES" (no other text, no whitespace) to '{{ review_current_path }}'.
+Return your verdict in the enforced JSON schema (the runner writes the rendered report or "NO_ISSUES" sentinel to '{{ review_current_path }}'):
+- If you find [CRITICAL] issues, set `verdict` to `"ISSUES"`, format the issues report in `issues_markdown`, and provide a concise `summary`.
+- If you find NO [CRITICAL] issues, set `verdict` to `"NO_ISSUES"`, set `issues_markdown` to `"NO_ISSUES"`, and provide a concise `summary`. Do NOT write to '{{ review_current_path }}' directly.

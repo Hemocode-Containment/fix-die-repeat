@@ -58,7 +58,7 @@ class TestSettings:
         assert settings.check_cmd is None
         assert settings.max_iters == DEFAULT_MAX_ITERS
         assert settings.model is None
-        assert settings.test_model is None
+        assert not settings.preflight
         assert settings.max_pr_threads == DEFAULT_MAX_PR_THREADS
         assert not settings.archive_artifacts
         assert settings.compact_artifacts
@@ -163,12 +163,12 @@ class TestSettings:
         assert settings.pr_review
         assert settings.debug
 
-    def test_get_settings_with_test_model(self) -> None:
-        """Test get_settings with test_model parameter."""
-        options = CliOptions(test_model="anthropic/claude-sonnet-4-5")
+    def test_get_settings_with_preflight(self) -> None:
+        """Test get_settings with preflight parameter."""
+        options = CliOptions(preflight=True)
         settings = get_settings(options)
 
-        assert settings.test_model == "anthropic/claude-sonnet-4-5"
+        assert settings.preflight is True
 
     def test_get_settings_with_max_pr_threads(self) -> None:
         """Test get_settings with max_pr_threads parameter (line 190)."""
@@ -352,7 +352,9 @@ class TestPaths:
         assert paths.checks_log == paths.fdr_dir / "checks.log"
         assert paths.checks_filtered_log == paths.fdr_dir / "checks_filtered.log"
         assert paths.checks_hash_file == paths.fdr_dir / ".checks_hashes"
-        assert paths.pi_log == paths.fdr_dir / "pi.log"
+        assert paths.agy_log == paths.fdr_dir / "agy.log"
+        assert paths.agy_transcripts_dir == paths.fdr_dir / "agy"
+        assert paths.runner_lock_file == paths.fdr_dir / "runner.lock"
         assert paths.fdr_log == paths.fdr_dir / "fdr.log"
         assert paths.pr_threads_cache == paths.fdr_dir / ".pr_threads_cache"
         assert paths.pr_threads_hash_file == paths.fdr_dir / ".pr_threads_hash"

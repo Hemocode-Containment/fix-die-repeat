@@ -167,11 +167,10 @@ class ArtifactManager:
     def perform_regular_compaction(self) -> None:
         """Perform regular compaction (truncate to 50 lines)."""
         self.logger.info(
-            "Artifacts exceed %s lines. Compacting with pi...",
+            "Artifacts exceed %s lines. Compacting artifacts...",
             self.settings.compact_threshold_lines,
         )
 
-        # Use simple truncation; pi-based compaction needs a dedicated prompt flow.
         for f in [self.paths.review_file, self.paths.build_history_file]:
             if f.exists():
                 before = get_file_line_count(f)
