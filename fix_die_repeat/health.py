@@ -29,6 +29,7 @@ _SUBPROCESS_TIMEOUT_S = 5.0
 _DEFAULT_REAP_GRACE_S = 2.0
 _REAP_POLL_INTERVAL_S = 0.05
 _LOCK_FILE_MODE = 0o600
+_SIGNAL_CHECK_EXISTENCE = 0
 
 _BOOT_ID_CACHE: list[str] = []
 
@@ -176,6 +177,17 @@ def same_process(first: ProcessIdentity | None, second: ProcessIdentity | None) 
     return first.pid == second.pid and first.start == second.start and first.boot == second.boot
 
 
+def _process_group_exists(pgid: int) -> bool:
+    """Check whether any live process remains in process group ``pgid``."""
+    try:
+        os.killpg(pgid, _SIGNAL_CHECK_EXISTENCE)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def reap_process_group(
     pgid: int,
     *,
@@ -196,8 +208,7 @@ def reap_process_group(
 
     deadline = time.monotonic() + max(0.0, grace_seconds)
     while time.monotonic() < deadline:
-        current = process_identity(pgid)
-        if current is None or current.zombie:
+        if not _process_group_exists(pgid):
             return
         time.sleep(_REAP_POLL_INTERVAL_S)
 

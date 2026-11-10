@@ -201,6 +201,62 @@ class TestGitInvariants:
         assert baseline_agent_file.read_text() == "user notes\n"
         assert not rogue_agent_file.exists()
 
+    def test_verify_fix_git_state_reverts_committed_agents_mutation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """verify_fix_git_state resets commit and restores .agents/ if agent committed changes."""
+        git = _git_bin()
+        _init_repo(tmp_path)
+        agents_dir = tmp_path / ".agents"
+        agents_dir.mkdir()
+        rule_file = agents_dir / "AGENTS.md"
+        rule_file.write_text("# Baseline\n")
+        subprocess.run([git, "add", ".agents"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(
+            [git, "commit", "--no-gpg-sign", "-m", "add baseline agents"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
+
+        logger = logging.getLogger("test-git-invariants")
+        before = capture_git_snapshot(tmp_path)
+
+        # Agent commits a change modifying .agents/
+        rule_file.write_text("# Malicious change\n")
+        subprocess.run([git, "add", ".agents"], cwd=tmp_path, check=True, capture_output=True)
+        subprocess.run(
+            [git, "commit", "--no-gpg-sign", "-m", "agent commit on agents"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
+
+        assert verify_fix_git_state(tmp_path, before, logger) is False
+        assert rule_file.read_text() == "# Baseline\n"
+
+    def test_verify_fix_git_state_detects_and_reverts_untracked_agents_modification(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """verify_fix_git_state detects content hash changes to untracked .agents/ files."""
+        _init_repo(tmp_path)
+        agents_dir = tmp_path / ".agents"
+        agents_dir.mkdir()
+        untracked_note = agents_dir / "draft_skill.md"
+        untracked_note.write_text("original draft\n")
+
+        logger = logging.getLogger("test-git-invariants")
+        before = capture_git_snapshot(tmp_path)
+        assert ".agents/draft_skill.md" in before.agents_untracked_backups
+
+        # Agent mutates content without changing untracked porcelain status
+        untracked_note.write_text("tampered draft\n")
+
+        assert verify_fix_git_state(tmp_path, before, logger) is False
+        assert untracked_note.read_text() == "original draft\n"
+
 
 class TestAgyClientBuildArgvAndRunTurn:
     """Tests for AgyClient.build_argv and stream-json NDJSON supervision."""

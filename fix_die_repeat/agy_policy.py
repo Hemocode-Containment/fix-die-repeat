@@ -39,6 +39,31 @@ _WINDOW_GEMINI_5H = "antigravity-quota-summary-gemini-5h"
 _WINDOW_GEMINI_WEEKLY = "antigravity-quota-summary-gemini-weekly"
 _WINDOW_ARGON_WEEKLY = "antigravity-quota-summary-gemini-argon-wtu-weekly"
 
+_FIX_VERIFICATION_COMMANDS: tuple[str, ...] = (
+    "pytest*",
+    "python -m pytest*",
+    "python3 -m pytest*",
+    "uv run*",
+    "uv test*",
+    "poetry run*",
+    "tox*",
+    "ruff check*",
+    "mypy*",
+    "npm test*",
+    "npm run test*",
+    "pnpm test*",
+    "pnpm run test*",
+    "yarn test*",
+    "cargo test*",
+    "cargo check*",
+    "go test*",
+    "make test*",
+    "make check*",
+    "ctest*",
+    "git status*",
+    "git diff*",
+)
+
 
 class AgentRole(StrEnum):
     """Logical roles for ``agy`` invocations in ``fix-die-repeat``."""
@@ -748,11 +773,12 @@ def resolve_role_chain(
 
 @dataclass(frozen=True)
 class PermissionProfileContext:
-    """Filesystem paths needed to construct a per-role ``--settings`` permission profile."""
+    """Filesystem paths and settings needed to construct a per-role ``--settings`` profile."""
 
     project_root: Path
     fdr_dir: Path
     fdr_home: Path
+    check_cmd: str = ""
 
 
 def build_permission_settings(
@@ -795,7 +821,8 @@ def build_permission_settings(
                     f"edit_file({introspection_file})",
                 ],
                 "allow": [
-                    f"read_file({fdr_home})",
+                    f"read_file({templates_dir}/)",
+                    f"read_file({introspection_file})",
                     f"write_file({templates_dir}/)",
                     f"edit_file({templates_dir}/)",
                 ],
@@ -803,6 +830,27 @@ def build_permission_settings(
         }
 
     # AgentRole.FIX
+    allow_commands: list[str] = [f"command({cmd})" for cmd in _FIX_VERIFICATION_COMMANDS]
+    raw_cmd = paths.check_cmd.strip()
+    if raw_cmd:
+        check_rule = f"command({raw_cmd}*)"
+        if check_rule not in allow_commands:
+            allow_commands.append(check_rule)
+        first_token = raw_cmd.split()[0]
+        if first_token and first_token not in {
+            "python",
+            "python3",
+            "sh",
+            "bash",
+            "zsh",
+            "eval",
+            "exec",
+            "sudo",
+        }:
+            base_rule = f"command({first_token}*)"
+            if base_rule not in allow_commands:
+                allow_commands.append(base_rule)
+
     return {
         "permissions": {
             "deny": [
@@ -812,6 +860,8 @@ def build_permission_settings(
                 f"edit_file({proj}/.agents/)",
                 f"write_file({fdr_dir}/)",
                 f"edit_file({fdr_dir}/)",
+                f"write_file({fdr_home}/)",
+                f"edit_file({fdr_home}/)",
                 "command(git commit*)",
                 "command(git push*)",
                 "command(git reset*)",
@@ -826,7 +876,7 @@ def build_permission_settings(
                 f"write_file({proj})",
                 f"edit_file({proj})",
                 f"read_file({fdr_dir})",
-                "command(*)",
+                *allow_commands,
             ],
         },
     }
@@ -965,7 +1015,6 @@ def _run_agy_smoke_test(executable: str) -> None:
         "--print-timeout",
         f"{_SMOKE_TIMEOUT_S}s",
         "--disable-slash-commands",
-        "--dangerously-skip-permissions",
         "-p",
         "Return status ok without calling any tools.",
     ]

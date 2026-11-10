@@ -120,6 +120,31 @@ class GitSnapshot:
     stash_sha: str = ""
     untracked_files: frozenset[str] = frozenset()
     agents_status: str = ""
+    agents_file_hashes: dict[str, str] = field(default_factory=dict)
+    agents_untracked_backups: dict[str, bytes] = field(default_factory=dict)
+
+
+def _snapshot_agents_state(
+    project_root: Path,
+    untracked_files: frozenset[str],
+) -> tuple[dict[str, str], dict[str, bytes]]:
+    """Capture content hashes and untracked file contents for everything under .agents/."""
+    agents_dir = project_root / ".agents"
+    if not agents_dir.is_dir():
+        return {}, {}
+    hashes: dict[str, str] = {}
+    backups: dict[str, bytes] = {}
+    for path in sorted(agents_dir.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            rel = str(path.relative_to(project_root))
+            try:
+                content = path.read_bytes()
+            except OSError:
+                continue
+            hashes[rel] = hashlib.sha256(content).hexdigest()
+            if rel in untracked_files:
+                backups[rel] = content
+    return hashes, backups
 
 
 def capture_git_snapshot(project_root: Path) -> GitSnapshot:
@@ -179,6 +204,10 @@ def capture_git_snapshot(project_root: Path) -> GitSnapshot:
     )
     agents_status = agents_out if rc_agents == 0 else ""
 
+    agents_file_hashes, agents_untracked_backups = _snapshot_agents_state(
+        project_root, untracked_files
+    )
+
     return GitSnapshot(
         is_git_repo=True,
         head_sha=head_sha,
@@ -188,6 +217,8 @@ def capture_git_snapshot(project_root: Path) -> GitSnapshot:
         stash_sha=stash_sha,
         untracked_files=untracked_files,
         agents_status=agents_status,
+        agents_file_hashes=agents_file_hashes,
+        agents_untracked_backups=agents_untracked_backups,
     )
 
 
@@ -209,6 +240,10 @@ def _revert_readonly_mutation(
             target.unlink(missing_ok=True)
         elif target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
+    for rel, content in before.agents_untracked_backups.items():
+        target = project_root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
     if before.stash_sha:
         run_command(
             [git_bin, "stash", "apply", "--index", before.stash_sha],
@@ -232,6 +267,7 @@ def verify_readonly_git_state(
         bool(before.head_sha and after.head_sha and after.head_sha != before.head_sha)
         or after.status_porcelain != before.status_porcelain
         or after.diff_sha256 != before.diff_sha256
+        or after.agents_file_hashes != before.agents_file_hashes
     )
 
     if mutated:
@@ -255,6 +291,15 @@ def _revert_agents_mutation(
                 target.unlink(missing_ok=True)
             elif target.is_dir():
                 shutil.rmtree(target, ignore_errors=True)
+    new_hashed = set(after.agents_file_hashes.keys()) - set(before.agents_file_hashes.keys())
+    for item in new_hashed:
+        target = project_root / item
+        if target.is_file() or target.is_symlink():
+            target.unlink(missing_ok=True)
+    for rel, content in before.agents_untracked_backups.items():
+        target = project_root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
     if before.stash_sha:
         run_command(
             [git_bin, "checkout", before.stash_sha, "--", ".agents"],
@@ -294,6 +339,7 @@ def verify_fix_git_state(
                 cwd=project_root,
                 check=False,
             )
+        after = capture_git_snapshot(project_root)
     elif before.staged_tree_sha and after.staged_tree_sha != before.staged_tree_sha:
         logger.warning(
             "Fix turn staged changes without committing; restoring pre-turn staged index",
@@ -303,8 +349,14 @@ def verify_fix_git_state(
             cwd=project_root,
             check=False,
         )
+        after = capture_git_snapshot(project_root)
 
-    if after.agents_status != before.agents_status:
+    agents_mutated = (
+        after.agents_status != before.agents_status
+        or after.agents_file_hashes != before.agents_file_hashes
+    )
+
+    if agents_mutated:
         logger.error("Fix turn modified protected .agents/ customizations; reverting .agents/.")
         _revert_agents_mutation(project_root, before, after, git_bin)
         return False

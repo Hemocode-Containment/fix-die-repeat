@@ -14,6 +14,7 @@ from fix_die_repeat.health import (
     ProcessIdentity,
     RunnerLock,
     RunnerLockError,
+    _process_group_exists,
     process_identity,
     reap_process_group,
     same_process,
@@ -95,21 +96,29 @@ class TestReapProcessGroup:
             reap_process_group(os.getpid())
             mock_killpg.assert_not_called()
 
+    def test_process_group_exists_handles_errors(self) -> None:
+        """_process_group_exists returns False on ProcessLookupError and True on PermissionError."""
+        with patch("fix_die_repeat.health.os.killpg", side_effect=ProcessLookupError):
+            assert _process_group_exists(SAMPLE_PID) is False
+        with patch("fix_die_repeat.health.os.killpg", side_effect=PermissionError):
+            assert _process_group_exists(SAMPLE_PID) is True
+        with patch("fix_die_repeat.health.os.killpg", return_value=None):
+            assert _process_group_exists(SAMPLE_PID) is True
+
     def test_reaps_process_group_with_sigterm(self) -> None:
-        """reap_process_group sends SIGTERM and returns when process exits within grace period."""
+        """reap_process_group sends SIGTERM and returns when group exits within grace period."""
         with (
             patch("fix_die_repeat.health.os.killpg") as mock_killpg,
-            patch("fix_die_repeat.health.process_identity", return_value=None),
+            patch("fix_die_repeat.health._process_group_exists", return_value=False),
         ):
             reap_process_group(SAMPLE_PID, grace_seconds=0.5)
             mock_killpg.assert_called_once_with(SAMPLE_PID, signal.SIGTERM)
 
     def test_escalates_to_sigkill_on_timeout(self) -> None:
         """reap_process_group sends SIGKILL if process group remains alive past deadline."""
-        live = ProcessIdentity(pid=SAMPLE_PID, ppid=1, start="t0", boot="b0")
         with (
             patch("fix_die_repeat.health.os.killpg") as mock_killpg,
-            patch("fix_die_repeat.health.process_identity", return_value=live),
+            patch("fix_die_repeat.health._process_group_exists", return_value=True),
         ):
             reap_process_group(SAMPLE_PID, grace_seconds=0.0)
             assert mock_killpg.call_args_list == [

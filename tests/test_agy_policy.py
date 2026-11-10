@@ -18,6 +18,7 @@ from fix_die_repeat.agy_policy import (
     QuotaStateStore,
     QuotaWindow,
     RankingContext,
+    _run_agy_smoke_test,
     build_permission_settings,
     ensure_agy_ready,
     fetch_codexbar_snapshot,
@@ -314,11 +315,84 @@ class TestPermissionSettingsAndPreflight:
         permissions = parsed["permissions"]
         assert isinstance(permissions, dict)
         deny = permissions["deny"]
+        allow = permissions["allow"]
         assert isinstance(deny, list)
+        assert isinstance(allow, list)
         assert f"write_file({fdr_dir.resolve()}/)" in deny
+        assert f"write_file({fdr_home.resolve()}/)" in deny
+        assert f"edit_file({fdr_home.resolve()}/)" in deny
         assert "command(git commit*)" in deny
         assert "command(git push*)" in deny
-        assert "command(*)" in permissions["allow"]
+        assert "command(*)" not in allow
+        assert "command(pytest*)" in allow
+        assert "command(uv run*)" in allow
+
+    def test_build_permission_settings_fix_includes_custom_check_cmd(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Fix role allows the configured check command and its non-shell binary."""
+        fdr_home = tmp_path / "fdr"
+        fdr_dir = fdr_home / "repos" / "slug"
+        ctx = PermissionProfileContext(
+            project_root=tmp_path / "repo",
+            fdr_dir=fdr_dir,
+            fdr_home=fdr_home,
+            check_cmd="./scripts/ci.sh --check-only",
+        )
+        parsed = build_permission_settings(AgentRole.FIX, ctx)
+        permissions = parsed["permissions"]
+        assert isinstance(permissions, dict)
+        allow = permissions["allow"]
+        assert isinstance(allow, list)
+        assert "command(./scripts/ci.sh --check-only*)" in allow
+        assert "command(./scripts/ci.sh*)" in allow
+        assert "command(*)" not in allow
+
+    def test_build_permission_settings_improve_prompts_restricts_reads(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Improve-prompts role restricts reads to templates/ and introspection.yaml."""
+        fdr_home = tmp_path / "fdr"
+        fdr_dir = fdr_home / "repos" / "slug"
+        ctx = PermissionProfileContext(
+            project_root=tmp_path / "repo",
+            fdr_dir=fdr_dir,
+            fdr_home=fdr_home,
+        )
+        parsed = build_permission_settings(AgentRole.IMPROVE_PROMPTS, ctx)
+        permissions = parsed["permissions"]
+        assert isinstance(permissions, dict)
+        allow = permissions["allow"]
+        deny = permissions["deny"]
+        assert isinstance(allow, list)
+        assert isinstance(deny, list)
+        templates_dir = (fdr_home / "templates").resolve()
+        introspection_file = (fdr_home / "introspection.yaml").resolve()
+        assert f"read_file({templates_dir}/)" in allow
+        assert f"read_file({introspection_file})" in allow
+        assert f"read_file({fdr_home.resolve()})" not in allow
+        assert "command(*)" in deny
+
+    def test_run_agy_smoke_test_enforces_permissions_without_bypass(self) -> None:
+        """_run_agy_smoke_test runs without --dangerously-skip-permissions."""
+        fake_result = MagicMock()
+        fake_result.returncode = 0
+        fake_result.stdout = json.dumps(
+            {
+                "event": "result",
+                "result": {"status": "SUCCESS", "structured_output": {"status": "ok"}},
+            },
+        )
+        with patch(
+            "fix_die_repeat.agy_policy.subprocess.run",
+            return_value=fake_result,
+        ) as mock_run:
+            _run_agy_smoke_test("agy")
+            argv = mock_run.call_args[0][0]
+            assert "--dangerously-skip-permissions" not in argv
+            assert "--settings" in argv
 
     def test_ensure_agy_ready_uses_cache_when_version_matches(self, tmp_path: Path) -> None:
         """ensure_agy_ready skips smoke test when cached version matches."""

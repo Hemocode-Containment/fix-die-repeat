@@ -393,6 +393,7 @@ class AgyRunner:
             project_root=self.paths.project_root,
             fdr_dir=self.paths.fdr_dir,
             fdr_home=fdr_home,
+            check_cmd=getattr(self.settings, "check_cmd", "") or "",
         )
         settings_obj = build_permission_settings(role_enum, perm_ctx)
         add_dirs = (
